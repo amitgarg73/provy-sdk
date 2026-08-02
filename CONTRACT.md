@@ -30,7 +30,14 @@ buffered flush would fail at once rather than degrading.
 
 **Idempotent writes.** Retries are automatic here, and the server upserts on
 `(tenant_id, session_id, span_id)`. If that conflict target were removed, this SDK's retries would
-start duplicating rows — the client would become the cause of the corruption it exists to avoid.
+start duplicating rows, and the client would become the cause of the corruption it exists to avoid.
+
+Half of that property is ours to hold up, and 0.5.0 did not. The server deliberately does **not**
+collapse spans that arrive with no `span_id`, since a step that did not identify itself cannot be
+deduped, and `trace()` only set one when OpenTelemetry happened to be installed. OTel is an optional
+extra, so the default install duplicated on every retry. Measured: the same body sent twice wrote 2
+rows without an id and 1 row with one. Since 0.5.1 every span carries an id whether or not OTel is
+present. **Do not make `span_id` optional again on either side of this contract.**
 
 ## What to do about it
 

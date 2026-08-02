@@ -19,7 +19,9 @@ Telemetry that silently disappears is worse than none, so this client is built n
 - **Buffers and batches** spans, flushing on a background thread and again at process exit, so a
   short script cannot end with telemetry still in memory.
 - **Never silent.** Anything dropped is counted and logged, and the counts are readable at
-  `client.buffer_stats`.
+  `client.buffer_stats`. Telemetry being switched off is announced too, once, on stderr.
+- **Never duplicates.** Every span carries an id, so the server can recognise a retried write as
+  the same span rather than a second one.
 - **Never raises into your agent.** A failed send is our problem, not a crash in your pipeline.
 
 ---
@@ -28,7 +30,6 @@ Telemetry that silently disappears is worse than none, so this client is built n
 
 ```bash
 pip install provy-sdk
-```
 ```
 
 The base install is the ingest client only (just `requests`). Optional extras:
@@ -46,12 +47,27 @@ The base install is the ingest client only (just `requests`). Optional extras:
 Get an ingest key from Provy: **Agent Fleets → your fleet → Reveal key**. Set it in your environment:
 
 ```bash
-export PROVY_API_KEY=argus_...   # key values are still prefixed argus_
+export PROVY_API_KEY=provy_...
+export PROVY_EMIT=1              # required, see below
 # optional, defaults to the hosted app:
 export PROVY_URL=https://provy.ai
 ```
 
-That key authenticates your fleet. It is the only credential you need.
+That key authenticates your fleet. It is the only credential you need. Keys issued before mid-2026
+begin with `argus_` and still work.
+
+### `PROVY_EMIT`: read this before your first run
+
+**Nothing is sent unless `PROVY_EMIT=1` is set** (or you pass `enabled=True` to the client). With it
+unset the client is a deliberate no-op: `open_session()` returns a local id, everything else does
+nothing, and your code runs unchanged.
+
+This exists so a laptop run holding production credentials cannot write into your production Provy.
+Set it in the environments that should report (production, staging, CI) and leave it off on your
+machine.
+
+The client logs one warning to stderr the first time it suppresses anything, so a run that reports
+nothing tells you why. Before 0.5.1 it did not, and the only clue was an empty dashboard.
 
 ---
 

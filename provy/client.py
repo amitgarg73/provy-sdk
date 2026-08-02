@@ -47,6 +47,47 @@ from .transport import SpanBuffer, post_with_retry
 PROVY_BASE_URL = os.environ.get("PROVY_URL") or os.environ.get("ARGUS_URL", "https://provy.ai")
 
 
+_EMIT_WARNED = False
+_EMIT_WARN_LOCK = threading.Lock()
+
+EMIT_OFF_MESSAGE = (
+    "provy: telemetry is OFF, nothing will be sent. open_session() returns a local id and "
+    "trace/eval/close do nothing. This is the default so a laptop run holding production "
+    "credentials cannot write into production Provy. Set PROVY_EMIT=1 in the environment that "
+    "should report, or pass enabled=True to the client."
+)
+
+
+def _warn_emit_off() -> None:
+    """Say it once per process, on stderr, the first time emission is suppressed.
+
+    ⛔ THE GATE IS NOT THE BUG, THE SILENCE WAS. Before this existed the client returned a
+    well-formed session id, raised nothing, logged nothing, and wrote nothing: indistinguishable
+    from working. A new user pip-installed, followed the README, and the only feedback available
+    was the absence of rows on a dashboard they might not have open. For a product whose claim is
+    proving agents did the work, silently proving nothing is the worst available default.
+
+    A warning and not an exception, deliberately: raising would break the property the gate exists
+    for, which is that your code runs unchanged when telemetry is off. logging.warning reaches
+    stderr through the last-resort handler even with no logging configured, so this is visible by
+    default rather than only to callers who set up logging.
+    """
+    global _EMIT_WARNED
+    if _EMIT_WARNED:
+        return
+    with _EMIT_WARN_LOCK:
+        if _EMIT_WARNED:
+            return
+        _EMIT_WARNED = True
+    log.warning(EMIT_OFF_MESSAGE)
+
+
+def _reset_emit_warning() -> None:
+    """Test seam. The once-per-process flag is module state and would leak between tests."""
+    global _EMIT_WARNED
+    _EMIT_WARNED = False
+
+
 def _emit_enabled(override: "bool | None" = None) -> bool:
     """Whether the SDK may send telemetry to Provy.
 
@@ -54,11 +95,16 @@ def _emit_enabled(override: "bool | None" = None) -> bool:
     write into your production Provy. Turn it on in your production (or CI)
     environment with PROVY_EMIT=1, or pass enabled=True to the client. An explicit
     override always wins. When off, the client is a no-op: open_session returns a
-    local id and trace/close do nothing, so your code runs unchanged.
+    local id and trace/close do nothing, so your code runs unchanged. It says so
+    once, on stderr, rather than leaving you to infer it from missing data.
     """
     if override is not None:
-        return override
-    return os.environ.get("PROVY_EMIT", "").strip().lower() in ("1", "true", "yes", "on")
+        enabled = override
+    else:
+        enabled = os.environ.get("PROVY_EMIT", "").strip().lower() in ("1", "true", "yes", "on")
+    if not enabled:
+        _warn_emit_off()
+    return enabled
 
 # Optional OTel — imported at runtime so the SDK works without it installed
 try:
@@ -100,10 +146,17 @@ class ProvyExporter(SpanExporter):  # type: ignore[misc]
         self.endpoint = (endpoint or PROVY_BASE_URL).rstrip("/") + "/api/otlp/v1/traces"
         self._headers = {"x-provy-key": api_key, "Content-Type": "application/json"}
         self._enabled = enabled
+        # Check the gate now rather than waiting for the first call. A client is often built at
+        # import time and used much later; warning here puts the message next to the construction
+        # that caused it instead of somewhere deep in a run.
+        _emit_enabled(self._enabled)
+
 
     def export(self, spans) -> "SpanExportResult":  # type: ignore[override]
         if not _emit_enabled(self._enabled):
-            return SpanExportResult.SUCCESS  # type: ignore[attr-defined]  # emission off: drop silently
+            # Not silent any more: _emit_enabled warns once per process. SUCCESS is still the right
+            # answer to OTel, which would otherwise retry spans we are deliberately not sending.
+            return SpanExportResult.SUCCESS  # type: ignore[attr-defined]
         otlp_spans = []
         for span in spans:
             ctx = span.get_span_context()
@@ -168,6 +221,11 @@ class ProvyClient:
             "x-provy-key":  self.key,
             "Content-Type": "application/json",
         }
+        # Check the gate now rather than waiting for the first call. A client is often built at
+        # import time and used much later; warning here puts the message next to the construction
+        # that caused it instead of somewhere deep in a run.
+        _emit_enabled(self._enabled)
+
         # OTel state (populated when opentelemetry-sdk is installed)
         self._tracer         = None
         self._session_span   = None
@@ -240,7 +298,9 @@ class ProvyClient:
         outcome you later report for the same item, so per-item quality and reconciliation link up.
         """
         if not _emit_enabled(self._enabled):
-            return ""  # emission off: no-op
+            # Still hand back a real id. Its documented job is to be passed as parent_trace_id, and
+            # the caller's call graph must not change shape depending on whether telemetry is on.
+            return uuid.uuid4().hex[:16]
 
         span_id        = None
         parent_span_id = parent_trace_id  # caller override
@@ -283,7 +343,20 @@ class ProvyClient:
             "output_json":   output_json,
             "entity_id":     entity_id,
         }
-        if span_id:        body["span_id"]        = span_id
+        # ⛔ EVERY SPAN CARRIES AN ID, EVEN WITHOUT OpenTelemetry INSTALLED. The server dedupes on
+        # (tenant_id, session_id, span_id) and deliberately does NOT collapse spans that arrive
+        # without an id, because a step that did not identify itself cannot be deduped. Since
+        # post_with_retry resends after a lost response, an id-less span means a write that landed
+        # but whose reply was lost gets written a SECOND time.
+        #
+        # OTel is an optional extra, so before this line the DEFAULT `pip install provy-sdk`
+        # duplicated spans on every retry. Measured against a live endpoint: the same body sent
+        # twice wrote 2 rows with no span_id and 1 row with one.
+        #
+        # 16 hex chars matches the OTel span-id shape, so ids look the same either way.
+        if not span_id:
+            span_id = uuid.uuid4().hex[:16]
+        body["span_id"] = span_id
         if parent_span_id: body["parent_span_id"] = parent_span_id
 
         # Buffered by default. Returns the locally generated span id, so the caller's call graph is
@@ -292,7 +365,7 @@ class ProvyClient:
             self._buffer.add(body)
         else:
             post_with_retry(f"{self.base}/api/ingest/trace", body, self._headers)
-        return span_id or ""
+        return span_id
 
     # ---- transport ---------------------------------------------------------
 
