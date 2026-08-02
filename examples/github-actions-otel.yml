@@ -1,0 +1,34 @@
+# Reference: how a tenant pipeline runs in GitHub Actions and streams to Provy.
+# This mirrors how trading-agent-c runs today — the only difference per path is HOW the
+# pipeline sends data (OTel exporter here; the Provy SDK in the SDK path).
+#
+# Onboarding steps (the flow you already use):
+#   1. Onboard the fleet in the Provy UX  ->  copy the generated ingest key.
+#   2. In this repo: Settings -> Secrets and variables -> Actions -> New secret:
+#        PROVY_API_KEY = <the key from Provy>
+#   3. This workflow runs the pipeline on a schedule (and on demand) and streams to Provy
+#      using that secret. No key in code.
+#
+# Copy this to .github/workflows/run-pipeline.yml in the tenant repo.
+
+name: run-pipeline
+on:
+  workflow_dispatch: {}          # run manually from the Actions tab
+  schedule:
+    - cron: "*/30 * * * *"       # example cadence — set to your pipeline's schedule
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Your real pipeline goes here. This demo emits standard OTel spans to Provy.
+      - name: Run pipeline -> stream to Provy
+        env:
+          PROVY_API_KEY: ${{ secrets.PROVY_API_KEY }}
+          PROVY_OTLP_ENDPOINT: https://provyai.vercel.app/api/otlp/v1/traces
+        run: python examples/otel_quickstart.py

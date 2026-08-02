@@ -1,0 +1,9 @@
+# Dependencies are declared in pyproject.toml. For local development, install the
+# package with every extra plus the test runner:
+#
+#   pip install -e ".[all]" pytest
+#
+# Base install (ingest client only): pip install provy-sdk
+# Extras: [judge] (anthropic) · [engine] (supabase, legacy direct-DB) · [otel]
+-e .[all]
+pytest>=7

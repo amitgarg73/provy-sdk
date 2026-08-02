@@ -1,0 +1,85 @@
+name: Publish to PyPI
+
+# Trigger: push a tag like `v0.5.0`.
+#
+# ⛔ TRUSTED PUBLISHING (OIDC), NO STORED TOKEN. GitHub proves this workflow's identity to PyPI
+# directly, so there is no credential to store, leak or rotate.
+#
+# ONE-TIME SETUP ON PyPI (account owner only, cannot be automated):
+#   pypi.org -> Your projects -> Publishing -> pending publisher for `provy-sdk`
+#     Owner:       amitgarg73
+#     Repository:  provy-sdk        <- NOT argus. The publisher is scoped to a repo, so the split
+#                                      invalidates the old one and publishing fails until it moves.
+#     Workflow:    publish.yml      <- NOT publish-sdk.yml
+#     Environment: pypi
+#
+# ⛔ A PUBLISHED VERSION CANNOT BE UNPUBLISHED and consumers pin it. Hence: tags only, a manual run
+# builds without uploading, and the version-exists check is fatal.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    name: build and verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install tooling
+        run: |
+          python -m pip install --upgrade pip build twine
+          pip install -e ".[all]" pytest
+      # The tests are the reason to trust the artifact. A client that loses spans is worse than no
+      # client, because a dependency pin makes it permanent.
+      - name: Test
+        run: pytest -q
+      - name: Refuse to build a version already on PyPI
+        run: |
+          VERSION=$(python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          echo "version: $VERSION"
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/provy-sdk/$VERSION/json")
+          if [ "$CODE" = "200" ]; then
+            echo "::error::provy-sdk $VERSION is already on PyPI. Versions are immutable. Bump it."
+            exit 1
+          fi
+          echo "$VERSION is free."
+      - name: Tag must match the declared version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION=$(python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::tag v$TAG does not match pyproject version $VERSION"
+            exit 1
+          fi
+      - run: python -m build
+      - name: Check metadata renders on PyPI
+        run: python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # ⛔ TAGS ONLY. A manual dispatch builds and verifies without uploading, which is what you want
+    # when checking an artifact before committing to it forever.
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: pypi
+      url: https://pypi.org/p/provy-sdk
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        # No password: trusted publishing supplies the credential over OIDC.
