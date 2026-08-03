@@ -21,7 +21,17 @@ from provy.client import ProvyClient, ProvyExporter
 from provy.session import TraceLogger
 from provy.evals import write_eval
 
-__version__ = "0.5.0"
+# ⛔ DERIVED, NEVER HARDCODED (#3). This used to be a literal, and 0.5.1 bumped pyproject.toml and
+# not this line, so a correctly-patched install reported "0.5.0". That is worse than a stale string:
+# 0.5.1 exists BECAUSE 0.5.0 silently duplicated spans on retry (#2), so the one value a user reads to
+# confirm they have the fix named the broken version. The version is stated once, in pyproject.toml,
+# and read from the installed package metadata here.
+try:
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+    __version__ = _pkg_version("provy-sdk")
+except PackageNotFoundError:  # running from a source checkout that was never installed
+    __version__ = "0.0.0.dev"
 
 # ── Lazy, heavy (loaded on first access; mapped to the extra that provides them) ──
 #   name -> (module, attribute, extra)
