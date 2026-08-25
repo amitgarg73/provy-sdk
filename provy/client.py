@@ -42,6 +42,7 @@ import functools
 import threading
 import logging
 import requests
+from .identity import agent_base
 from .transport import SpanBuffer, post_with_retry
 
 PROVY_BASE_URL = os.environ.get("PROVY_URL") or os.environ.get("ARGUS_URL", "https://provy.ai")
@@ -310,7 +311,13 @@ class ProvyClient:
             import opentelemetry.context as otel_ctx_api  # type: ignore[import]
             from opentelemetry.trace import NonRecordingSpan  # type: ignore[import]
 
-            if agent in self._agent_spans:
+            # ⛔ BY BASE NAME, NOT EXACT NAME. `research_GILD` has no span of its own; its parent
+            # is `research`. Looking up the exact name misses and silently falls through to the
+            # session root, which is how a fan-out arrives flat instead of nested (#668).
+            _base = agent_base(agent) or agent
+            if _base in self._agent_spans:
+                parent_span = self._agent_spans[_base]
+            elif agent in self._agent_spans:
                 parent_span = self._agent_spans[agent]
             elif self._session_span:
                 parent_span = self._session_span

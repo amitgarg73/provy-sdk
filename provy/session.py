@@ -8,6 +8,8 @@ from uuid import uuid4
 
 import pytz
 
+from .identity import agent_base
+
 
 log = logging.getLogger("provy.sdk")
 
@@ -385,7 +387,9 @@ class TraceLogger:
 
         payload: dict[str, Any] = {
             "span_id":        span_id,
-            "parent_span_id": self._agent_spans.get(agent),
+            # Same base-name rule as the OTel path; the REST payload carried the same bug (#668).
+            "parent_span_id": self._agent_spans.get(agent_base(agent) or agent)
+                              or self._agent_spans.get(agent),
             "entity_id":      entity_id,
             "date":           date.today().isoformat(),
             "sequence":       self._sequence,

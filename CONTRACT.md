@@ -45,3 +45,25 @@ Anyone changing the ingest contract in the `argus` repo must check this list. Th
 and human rules decay, so the intended replacement is a contract test in CI here that runs the real
 client against a deployed pre-prod and asserts both properties above. **It does not exist yet.** Until
 it does, this file is the only thing standing between a server change and a silently broken client.
+
+## Agent identity and span parentage (#668)
+
+⛔ **A sub-agent's parent span is looked up by BASE name, not exact name.** An agent that fans out
+per entity emits step names like `research_GILD`, and only `research` has a span. Looking the exact
+name up misses, falls through to the session root, and the trace arrives flat instead of nested.
+
+The rule lives in `provy/identity.py` and mirrors `lib/agent-identity.ts` on the server: strip a
+final `_SEGMENT` **only** when that segment is 1-5 uppercase letters.
+
+⛔ **`agent.split("_")[0]` is not this rule.** It folds `market_shadow` into `market` and
+`insights_agent` into `insights`, merging two different agents into one. Both names are real.
+
+Applies to **both** transports, which each carried the bug independently:
+
+- OTel — `client.py`, choosing the parent span for the OTel context.
+- REST — `session.py`, setting `parent_span_id` on the payload.
+
+⛔ **A span must still be ended when its agent finishes**, not swept at session close. A span held
+open until the session ends reports the session's remaining time rather than its own work: measured
+at 82–377s claimed against 9–23s of real work on the reference fleet. The SDK ends each span
+immediately; a caller building its own tracer must do the same.
