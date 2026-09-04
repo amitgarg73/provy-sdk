@@ -467,6 +467,7 @@ class ProvyClient:
         session_id:  str | None = None,
         source:      str = "confirmed",
         occurred_at: str | None = None,
+        business_date: str | None = None,
     ) -> None:
         """Report a real business outcome for a work item and reconcile it against the prediction.
 
@@ -476,6 +477,12 @@ class ProvyClient:
         to grade the contract's conditions (Estimated vs Real). Numeric strings coerce to numbers;
         non-numeric strings grade eq/in conditions. One call does both. Usually
         posted later by a downstream job when the outcome lands. No-op when emission is off.
+
+        business_date ('YYYY-MM-DD') is the day the WORK RAN, not the day you are reporting.
+        Together with entity_id it addresses exactly one work item, so send it whenever you know
+        it. Omit it only when an entity is worked at most once: with no date the server falls back
+        to the most recent open prediction for that entity, which silently picks the wrong attempt
+        for a retry, a re-run, or the same entity worked on two days (#733).
         """
         if not _emit_enabled(self._enabled):
             return  # emission off: no-op
@@ -483,11 +490,12 @@ class ProvyClient:
             "entity_id": entity_id,
             "source":    source,
         }
-        if label       is not None: body["label"]       = label
-        if value       is not None: body["value"]       = value
-        if signals     is not None: body["signals"]     = signals
-        if session_id  is not None: body["session_id"]  = session_id
-        if occurred_at is not None: body["occurred_at"] = occurred_at
+        if label         is not None: body["label"]         = label
+        if value         is not None: body["value"]         = value
+        if signals       is not None: body["signals"]       = signals
+        if session_id    is not None: body["session_id"]    = session_id
+        if occurred_at   is not None: body["occurred_at"]   = occurred_at
+        if business_date is not None: body["business_date"] = business_date
 
         r = post_with_retry(f"{self.base}/api/ingest/outcome", body, self._headers)
         if r is None or r.status_code >= 400:

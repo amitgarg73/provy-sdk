@@ -17,11 +17,28 @@ the drift comes back and nobody sees it until a customer does.
 | `POST /api/ingest/session/open` | starting a run | returns `{ session_id }` |
 | `POST /api/ingest/trace` | spans | accepts a single object **or an array** (server #479) |
 | `POST /api/ingest/session/close` | ending a run | accepts `session_id`, `result_summary`, `terminal_reason` |
-| `POST /api/ingest/eval` | quality checks | — |
-| `POST /api/ingest/outcome` | business outcome | — |
+| `POST /api/ingest/eval` | quality checks | accepts `session_id`, `eval_name`, `agent`, `score`, `passed`, `layer`, `entity_id`, `detail`, `threshold` |
+| `POST /api/ingest/outcome` | business outcome | accepts `entity_id` (required), `business_date`, `label` \| `value`, `signals`, `session_id`, `source`, `occurred_at` |
 | `POST /api/otlp/v1/traces` | the OTel exporter path | OTLP JSON |
 
 Auth is `x-provy-key` (legacy `x-argus-key` still accepted).
+
+## The work-item address (#733)
+
+A ledger row is keyed by `(tenant_id, workflow_id, entity_id, business_date)` and that tuple is
+unique. Tenant and workflow come from the ingest key, so **the caller supplies the other two.**
+
+`business_date` is the day the WORK RAN, not the day it is reported. Until 0.5.4 the SDK could not
+send it at all, so every SDK caller landed on the server's fallback: the most recent open prediction
+for that entity wins, with a warning logged server-side and nothing visible to the caller. That
+reconciles against the wrong attempt whenever an entity is worked more than once.
+
+⛔ **Do not default it client-side.** A guessed date addresses a row that is wrong with confidence,
+which is worse than a missing one landing on a documented fallback. Absent means absent.
+
+Note that the ServiceNow business rule in `argus` posts raw HTTP and always sent this field. The
+integration that reconciled correctly was the one that bypassed this SDK, which is the shape of
+evidence that says a contract test is missing (see Enforcement below).
 
 ## The two properties this client relies on
 
