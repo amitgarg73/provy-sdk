@@ -98,3 +98,72 @@ class TestLogSkip:
             result = tracer.log_skip("news", reason="no_candidates")
         assert isinstance(result, str)
         assert len(result) > 0
+
+
+class TestForwardClaim:
+    """The agent's own forward claim, carried as a field (argus#747).
+
+    ⛔ WHY A SEPARATE FIELD AND NOT A PAYLOAD KEY. Provy keeps the LAST value it sees for a signal
+    across a session. That is right for a READING (a close step supersedes earlier partials, and
+    grading depends on it) and it destroys a CLAIM: on the reference fleet an agent reported
+    `realized_pnl: 0` during the run, a later step reported the settled figure under the same key,
+    and Provy stored the settled figure as what the agent had claimed. Every non-zero claimed value
+    on that fleet is a byte-for-byte copy of what actually settled (argus#751).
+    """
+
+    @staticmethod
+    def _emit(fn_name, *args, **kwargs):
+        tracer, captured = _make_tracer()
+        with patch("provy.db.get_client", return_value=tracer._db):
+            getattr(tracer, fn_name)(*args, **kwargs)
+        return captured
+
+    def test_agent_message_carries_a_claim(self):
+        captured = self._emit(
+            "log_agent_message", "risk", "Entered AAPL.", "entered", entity_id="AAPL",
+            claim={"signal": "realized_pnl", "value": 133.2, "confidence": 0.9},
+        )
+        assert captured[-1]["payload"]["provy_claim"] == {
+            "signal": "realized_pnl", "value": 133.2, "confidence": 0.9,
+        }
+
+    def test_decision_carries_a_claim(self):
+        captured = self._emit("log_decision", "orchestrator", "approved",
+                              claim={"signal": "refund_posted", "value": True})
+        assert captured[-1]["payload"]["provy_claim"] == {"signal": "refund_posted", "value": True}
+
+    def test_a_list_of_claims_is_kept_as_a_list(self):
+        captured = self._emit("log_decision", "orchestrator", "approved", claim=[
+            {"signal": "pnl", "value": 1, "entity_id": "AAPL"},
+            {"signal": "pnl", "value": 2, "entity_id": "MSFT"},
+        ])
+        assert len(captured[-1]["payload"]["provy_claim"]) == 2
+
+    def test_a_malformed_claim_is_dropped_not_raised(self):
+        # ⛔ TELEMETRY MUST NEVER BREAK THE CALLER'S RUN. This is called from inside a logging path,
+        # so a claim the caller got wrong is logged and omitted, never raised into their code.
+        for bad in ("a string", 42, {"value": 1}, {"signal": "  ", "value": 1}, {"signal": "s"}):
+            captured = self._emit("log_decision", "orchestrator", "approved", claim=bad)
+            assert "provy_claim" not in captured[-1]["payload"], bad
+
+    def test_confidence_is_clamped_and_a_bad_one_omitted(self):
+        captured = self._emit("log_decision", "a", "x",
+                              claim={"signal": "s", "value": 1, "confidence": 80})
+        assert captured[-1]["payload"]["provy_claim"]["confidence"] == 1.0
+        captured = self._emit("log_decision", "a", "x",
+                              claim={"signal": "s", "value": 1, "confidence": "high"})
+        assert "confidence" not in captured[-1]["payload"]["provy_claim"]
+
+    def test_a_payload_key_cannot_shadow_the_claim(self):
+        # `payload.update()` merges caller keys, so an unvalidated `provy_claim` passed there would
+        # otherwise silently replace the validated one.
+        captured = self._emit(
+            "log_agent_message", "risk", "r", "ok",
+            payload={"provy_claim": {"signal": "spoofed", "value": 0}},
+            claim={"signal": "realized_pnl", "value": 5},
+        )
+        assert captured[-1]["payload"]["provy_claim"]["signal"] == "realized_pnl"
+
+    def test_no_claim_leaves_the_payload_untouched(self):
+        captured = self._emit("log_agent_message", "risk", "r", "ok")
+        assert "provy_claim" not in captured[-1]["payload"]

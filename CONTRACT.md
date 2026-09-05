@@ -23,6 +23,73 @@ the drift comes back and nobody sees it until a customer does.
 
 Auth is `x-provy-key` (legacy `x-argus-key` still accepted).
 
+## The forward claim (#747)
+
+`log_agent_message(..., claim=)` and `log_decision(..., claim=)` put a claim into the span payload
+under the reserved key **`provy_claim`**, as `{signal, value, confidence?, entity_id?}` or a list of
+those. The server lifts it into its own column at ingest.
+
+⛔ **It is a separate key on purpose, and putting a claim in `payload` does not work.** The server
+keeps the LAST value it sees for a signal across a session. That is correct for a READING, because a
+close step supersedes earlier partials and grading depends on it. It destroys a CLAIM. Measured on
+the reference fleet: an agent reported `realized_pnl: 0` during the run, a later step reported the
+settled figure under the same key, and the server stored the settled figure as what the agent had
+claimed. Every non-zero claimed value on that fleet is a byte-for-byte copy of what settled.
+
+⛔ **`signal` must name the key the OUTCOME settles under.** A claim filed under a name the contract
+does not grade never meets the outcome it is meant to be compared against, so it buys nothing. If
+the contract grades `refund_posted`, claim `refund_posted`, not `expected_refund`.
+
+⛔ **A claim never arrives on its own, from any transport.** No auto-instrumentation emits one,
+because none exists in the OpenTelemetry semantic conventions: GenAI covers model, tokens and tool
+names, all of which a library can observe by watching. "I expect this refund to post" is not
+observable. Only whoever wrote the agent knows what it is trying to achieve. This is a semantics
+gap, not a transport gap, which is why there is no `POST /api/ingest/claim` and should not be: on
+the trace, the agent, the act and the span id come free and anchor the claim to the moment it was
+made. Behind a door you get a claim with no trace behind it.
+
+**On the OTel path** the same claim rides as the attribute `provy.claim`, JSON-encoded. Structured
+values ride as `provy.payload.<key>`. ⛔ That prefix was silently dropped by the gateway until
+argus#755: measured on the reference fleet, `target_price`, `estimated_profit`, `entry_price` and
+`realized_pnl` were each present on **0** of the 3,556 spans carrying a payload. If you are pinning
+a server version, this is one to pin above.
+
+## The payload shapes this client sends
+
+⛔ **These two rows used to be a dash, and #733 lived in exactly that gap.** A shape the document
+does not state is a shape nobody can check.
+
+**`POST /api/ingest/outcome`**
+
+```json
+{
+  "entity_id":   "AAPL",           // REQUIRED. The work item.
+  "business_date": "2026-09-05",   // the day the WORK RAN. Absent lands on the server fallback.
+  "label":       "success",        // "success" | "fail", or omit and send `value`
+  "value":       -29.05,           // numeric result, if the outcome carries one
+  "signals":     { "win_rate": 0.4 },  // extra readings, optional
+  "session_id":  "…",              // optional; the ledger keys on entity + date, not session
+  "source":      "broker",         // who settled it
+  "occurred_at": "2026-09-05T21:00:00Z"
+}
+```
+
+**`POST /api/ingest/eval`**
+
+```json
+{
+  "session_id": "…",               // REQUIRED
+  "eval_name":  "no_hallucination",
+  "agent":      "research",
+  "score":      0.93,              // 0-1
+  "passed":     true,
+  "layer":      4,                 // 4 is the LLM judge; only layer 4 feeds the quality score
+  "entity_id":  "AAPL",            // optional; without it the eval describes the whole session
+  "threshold":  0.7,
+  "detail":     { }
+}
+```
+
 ## The work-item address (#733)
 
 A ledger row is keyed by `(tenant_id, workflow_id, entity_id, business_date)` and that tuple is

@@ -13,6 +13,60 @@ from .identity import agent_base
 
 log = logging.getLogger("provy.sdk")
 
+# The reserved payload key the server reads a forward claim out of (argus#747). It is lifted into
+# its own column at ingest, so it survives trace-body offload and cannot be overwritten by a later
+# reading of the same signal.
+CLAIM_KEY = "provy_claim"
+
+
+def _normalise_claim(claim: Any) -> Optional[list]:
+    """Validate a forward claim, or return None so a malformed one is dropped rather than stored.
+
+    ⛔ A CLAIM IS NOT A PAYLOAD KEY, AND THAT IS THE WHOLE POINT (argus#751). Provy keeps the LAST
+    value it sees for a signal across a session, which is correct for a READING: a close step
+    supersedes earlier partials and grading depends on it. It destroys a CLAIM. On the reference
+    fleet an agent reported `realized_pnl: 0` during the run, a later step reported the settled
+    figure under the same key, and Provy stored the settled figure as what the agent had claimed.
+    Every non-zero "claimed" value on that fleet is a byte-for-byte copy of what actually settled.
+
+    A claim in its own key does not compete with a reading, because nothing else writes that key.
+
+    ⛔ `signal` MUST NAME THE KEY THE OUTCOME SETTLES UNDER. A claim filed under a name the contract
+    does not grade never meets the outcome it is meant to be compared with, so it is worth nothing.
+    If your contract grades `refund_posted`, claim `refund_posted`, not `expected_refund`.
+
+    ⛔ DROPPED, NOT RAISED. Telemetry must never break the caller's run, and this is called from
+    inside a logging path. A malformed claim is logged at warning and omitted.
+    """
+    if claim is None:
+        return None
+    items = claim if isinstance(claim, (list, tuple)) else [claim]
+    out = []
+    for c in items:
+        if not isinstance(c, dict):
+            log.warning("provy: claim ignored, expected a dict, got %s", type(c).__name__)
+            continue
+        signal = c.get("signal")
+        if not isinstance(signal, str) or not signal.strip():
+            log.warning("provy: claim ignored, it names no signal")
+            continue
+        if "value" not in c:
+            log.warning("provy: claim on %r ignored, it states no value", signal)
+            continue
+        item: dict[str, Any] = {"signal": signal.strip(), "value": c["value"]}
+        conf = c.get("confidence")
+        if isinstance(conf, (int, float)) and not isinstance(conf, bool):
+            # Clamped rather than refused: a caller on a 0-100 scale is a docs failure, and dropping
+            # their confidence is a worse answer than pinning it to the range.
+            item["confidence"] = min(1.0, max(0.0, float(conf)))
+        elif conf is not None:
+            log.warning("provy: claim on %r has a non-numeric confidence, omitting it", signal)
+        ent = c.get("entity_id")
+        if isinstance(ent, str) and ent.strip():
+            item["entity_id"] = ent.strip()
+        out.append(item)
+    return out or None
+
 
 def _load_env(key: str) -> str:
     val = os.environ.get(key, "")
@@ -139,8 +193,18 @@ class TraceLogger:
         tokens_output: int = 0,
         model: Optional[str] = None,
         latency_ms: int = 0,
+        payload: Optional[dict] = None,
+        claim: Optional[Any] = None,
     ) -> str:
-        """Write an agent_message row. Returns the new span_id."""
+        """Write an agent_message row. Returns the new span_id.
+
+        `payload` carries structured scalars alongside the prose. A number stated only inside
+        `reasoning` is one blob of text to Provy: it cannot be read as a signal, bound to a contract
+        condition, or compared with what settled.
+
+        `claim` is this step's FORWARD CLAIM: `{"signal", "value", "confidence"?, "entity_id"?}` or a
+        list of those. See `_normalise_claim` for why it is a separate field and not a payload key.
+        """
         return self._write({
             "step_type":       "agent_message",
             "agent":           agent,
@@ -151,6 +215,8 @@ class TraceLogger:
             "tokens_output":   tokens_output,
             "latency_ms":      latency_ms,
             "model":           model,
+            "payload":         payload,
+            "claim":           claim,
         })
 
     def log_decision(
@@ -160,8 +226,18 @@ class TraceLogger:
         detail: Optional[dict] = None,
         latency_ms: int = 0,
         model: Optional[str] = None,
+        claim: Optional[Any] = None,
     ) -> str:
-        """Write a session-level decision row. Returns span_id."""
+        """Write a session-level decision row. Returns span_id.
+
+        `claim` states what this decision EXPECTS to happen, before the answer exists:
+        `{"signal", "value", "confidence"?, "entity_id"?}` or a list of those.
+
+        A forward claim is a decision with an assertion attached, so this is a parameter rather than
+        a new concept and a new door. It is also accepted on `log_agent_message`, because a claim
+        belongs on the span where the agent actually made it: forcing every claim onto a `decision`
+        step would either misdescribe the act or make you log a second span for the same moment.
+        """
         return self._write({
             "step_type":   "decision",
             "agent":       agent,
@@ -169,6 +245,7 @@ class TraceLogger:
             "tool_output": detail,
             "latency_ms":  latency_ms,
             "model":       model,
+            "claim":       claim,
         })
 
     def log_skip(
@@ -399,6 +476,12 @@ class TraceLogger:
         if fields.get("tool_output")     is not None: payload["tool_output"]     = fields["tool_output"]
         if fields.get("agent_reasoning") is not None: payload["agent_reasoning"] = fields["agent_reasoning"]
         if fields.get("payload")         is not None: payload.update(fields["payload"])
+        # ⛔ WRITTEN LAST, SO A payload KEY CANNOT SHADOW THE CLAIM. `payload.update()` above merges
+        # caller-supplied keys, and a caller passing `provy_claim` in `payload` would otherwise
+        # silently replace a validated claim with an unvalidated one.
+        claim = _normalise_claim(fields.get("claim"))
+        if claim is not None:
+            payload[CLAIM_KEY] = claim[0] if len(claim) == 1 else claim
 
         row: dict[str, Any] = {
             "tenant_id":     self._tenant_id,
