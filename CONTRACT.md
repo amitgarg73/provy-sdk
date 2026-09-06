@@ -126,9 +126,21 @@ present. **Do not make `span_id` optional again on either side of this contract.
 ## What to do about it
 
 Anyone changing the ingest contract in the `argus` repo must check this list. That is a human rule
-and human rules decay, so the intended replacement is a contract test in CI here that runs the real
-client against a deployed pre-prod and asserts both properties above. **It does not exist yet.** Until
-it does, this file is the only thing standing between a server change and a silently broken client.
+and human rules decay, so the replacement is a contract test in CI that runs the real client against
+a deployed pre-prod and asserts both properties above.
+
+✅ **It exists as of 6 Sep 2026: `argus/harness/sdk-contract.py`, run nightly by
+`certify-nightly.yml`.** It installs the PUBLISHED wheel from PyPI, provisions a throwaway synthetic
+tenant, drives `ProvyClient` as a customer would, verifies what landed with `psql`, and destroys the
+tenant in a `finally`. Seven assertions, including that a re-sent span writes one row and that every
+span carries a `span_id`.
+
+⛔ **IT LIVES IN THE ARGUS REPO, NOT HERE, AND THAT IS DELIBERATE.** Verifying idempotency needs a
+read of `ag_traces`, so it needs a database URL. That credential exists in one repository and adding
+it to a second is the exposure `/api/admin/tenants` was built to remove. The test still tests THIS
+client, by version, from PyPI.
+
+⛔ **AND IT TESTS THE WHEEL, NOT THE REPO**, because that is where 0.5.0's two defects were.
 
 ## Agent identity and span parentage (#668)
 
