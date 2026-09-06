@@ -45,7 +45,35 @@ import requests
 from .identity import agent_base
 from .transport import SpanBuffer, post_with_retry
 
-PROVY_BASE_URL = os.environ.get("PROVY_URL") or os.environ.get("ARGUS_URL", "https://provy.ai")
+# ⛔ `PROVY_BASE_URL` IS ACCEPTED BECAUSE IT IS THE OBVIOUS GUESS, AND THE WRONG GUESS WAS SILENT.
+# The variable was `PROVY_URL` while the constant below is named `PROVY_BASE_URL`, so anyone reading
+# this file and setting what it appeared to be called kept the default instead: production. A
+# pre-prod key then hits provy.ai, gets a correct 401, and the customer's telemetry goes nowhere they
+# would think to look. Both names work; `PROVY_URL` still wins when both are set.
+PROVY_BASE_URL = (
+    os.environ.get("PROVY_URL")
+    or os.environ.get("PROVY_BASE_URL")
+    or os.environ.get("ARGUS_URL", "https://provy.ai")
+)
+
+def _with_claim(output_json: dict | None, claim: "dict | list | None") -> dict | None:
+    """Put a forward claim under the reserved payload key the server lifts into its own column.
+
+    ⛔ THE CLAIM SHIPPED ON `TraceLogger` ONLY, WHICH IS THE DIRECT-DB PATH. `CONTRACT.md` tells new
+    pipelines to prefer this client, so the feature was unreachable as a named argument on the path
+    we recommend. It was always reachable by hand as `output_json={"provy_claim": ...}`; this makes
+    it something a caller can find.
+
+    ⛔ IT IS A SEPARATE KEY, NOT A PAYLOAD FIELD. The server keeps the LAST value it sees for a
+    signal across a session, which is right for a READING and destroys a CLAIM: the settled figure
+    would overwrite the forecast and then be attributed to the agent that forecast it.
+    """
+    if claim is None:
+        return output_json
+    merged = dict(output_json or {})
+    merged["provy_claim"] = claim
+    return merged
+
 
 
 _EMIT_WARNED = False
@@ -290,6 +318,7 @@ class ProvyClient:
         cost_usd:       float | None = None,
         error:          str | None = None,
         output_json:    dict | None = None,
+        claim:          dict | list | None = None,
         parent_trace_id: str | None = None,
         entity_id:      str | None = None,
     ) -> str:
@@ -347,7 +376,7 @@ class ProvyClient:
             "tokens_output": tokens_out,
             "cost_usd":      cost_usd,
             "error":         error,
-            "output_json":   output_json,
+            "output_json":   _with_claim(output_json, claim),
             "entity_id":     entity_id,
         }
         # ⛔ EVERY SPAN CARRIES AN ID, EVEN WITHOUT OpenTelemetry INSTALLED. The server dedupes on

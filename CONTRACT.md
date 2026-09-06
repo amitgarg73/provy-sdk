@@ -10,6 +10,14 @@ without this repo noticing. That trade was made on purpose — the SDK release c
 attached to a website deploy — but the protection it removed has to be replaced by something, or
 the drift comes back and nobody sees it until a customer does.
 
+## Pointing the client somewhere
+
+`PROVY_URL` sets the host. **`PROVY_BASE_URL` is accepted too, since 0.6.1**, because the module
+constant is named `PROVY_BASE_URL` and setting what the file appears to be called was silently
+ignored: the client kept the default, `https://provy.ai`, and a pre-prod key sent there gets a
+correct 401 while the customer's telemetry goes nowhere they would think to look. `PROVY_URL` wins
+when both are set.
+
 ## What this SDK depends on
 
 | Endpoint | Used for | Shape it assumes |
@@ -24,6 +32,12 @@ the drift comes back and nobody sees it until a customer does.
 Auth is `x-provy-key` (legacy `x-argus-key` still accepted).
 
 ## The forward claim (#747)
+
+⛔ **AVAILABLE ON BOTH PATHS SINCE 0.6.1, AND ON ONLY ONE IN 0.6.0.** `TraceLogger.log_agent_message`
+and `log_decision` take `claim=`, and so does `ProvyClient.trace(...)`, which is the path this
+document tells new pipelines to prefer. In 0.6.0 the ingest path had no named argument: a claim was
+reachable only by hand as `output_json={"provy_claim": {...}}`. Found by the contract test on the day
+0.6.0 was published, which is what that test is for.
 
 `log_agent_message(..., claim=)` and `log_decision(..., claim=)` put a claim into the span payload
 under the reserved key **`provy_claim`**, as `{signal, value, confidence?, entity_id?}` or a list of

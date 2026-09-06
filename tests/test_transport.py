@@ -192,3 +192,44 @@ def test_buffer_is_thread_safe():
     assert buf.stats["pending"] == 0
     assert buf.stats["dropped"] == 0
     assert buf.stats["failed"] == 0
+
+
+# ── The forward claim on the ingest path (0.6.1) ────────────────────────────────────────────────
+#
+# ⛔ THE CLAIM SHIPPED ON `TraceLogger` ONLY IN 0.6.0, which is the direct-DB path. CONTRACT.md tells
+# new pipelines to prefer `ProvyClient`, so the feature was unreachable as a named argument on the
+# path we recommend. Found by the contract test the day 0.6.0 was published.
+def test_claim_goes_under_the_reserved_key():
+    from provy.client import _with_claim
+    c = {"signal": "realized_pnl", "value": 42.5}
+    assert _with_claim(None, c) == {"provy_claim": c}
+    assert _with_claim({"agent_reasoning": "x"}, c) == {"agent_reasoning": "x", "provy_claim": c}
+
+
+def test_no_claim_leaves_the_payload_exactly_as_it_was():
+    from provy.client import _with_claim
+    # ⛔ IDENTITY, NOT AN EMPTY DICT. A caller that sent no output_json must still send none, or a
+    # span that carried nothing starts carrying an empty object and the R2 offload threshold moves.
+    assert _with_claim(None, None) is None
+    same = {"a": 1}
+    assert _with_claim(same, None) is same
+
+
+def test_the_caller_s_dict_is_not_mutated():
+    from provy.client import _with_claim
+    original = {"agent_reasoning": "x"}
+    _with_claim(original, {"signal": "s", "value": 1})
+    assert original == {"agent_reasoning": "x"}
+
+
+def test_both_host_variables_are_accepted(monkeypatch):
+    # ⛔ THE WRONG GUESS WAS SILENT AND SENT A PRE-PROD KEY TO PRODUCTION. The variable was
+    # PROVY_URL while the module constant is named PROVY_BASE_URL, so setting what the file appeared
+    # to be called kept the default host instead.
+    import importlib, provy.client as c
+    for var in ("PROVY_URL", "PROVY_BASE_URL", "ARGUS_URL"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("PROVY_BASE_URL", "https://dev.provy.ai")
+    assert importlib.reload(c).PROVY_BASE_URL == "https://dev.provy.ai"
+    monkeypatch.setenv("PROVY_URL", "https://other.example")
+    assert importlib.reload(c).PROVY_BASE_URL == "https://other.example"  # PROVY_URL still wins
