@@ -128,6 +128,77 @@ Provy auto-detects the convention (OpenInference, OpenLLMetry/Traceloop, Langfus
 
 ---
 
+## Keeping sensitive values out of Provy
+
+Pass a `mask` and it runs on every payload before anything leaves your process. Provy also masks
+credentials and common identifiers on its own way out to a model provider, and that cannot be switched
+off, but by then it already holds your data. Masking here means the raw value never arrives.
+
+```python
+from provy import ProvyClient, tokenizing_masker
+
+client = ProvyClient(
+    ingest_key="provy_...",
+    mask=tokenizing_masker(secret=os.environ["MY_MASK_SECRET"]),
+)
+```
+
+That masks bearer tokens, API keys, JWTs, email addresses, US SSNs, Luhn-valid card numbers and
+separator-formatted phone numbers. **Keep the secret yourself and the tokens are irreversible to Provy.**
+
+### Why tokens and not `[REDACTED]`
+
+Replacing every email with one flat label makes two very different runs identical:
+
+```text
+looked up [REDACTED_EMAIL] ... refunded [REDACTED_EMAIL]     # correct
+looked up [REDACTED_EMAIL] ... refunded [REDACTED_EMAIL]     # refunded the WRONG person
+```
+
+Nothing downstream can tell those apart. `tokenizing_masker` gives each distinct value a stable
+pseudonym instead, so the same person is the same token everywhere and a different person visibly is
+not:
+
+```text
+looked up [EMAIL_a91c4e2f7b03] ... refunded [EMAIL_a91c4e2f7b03]   # correct
+looked up [EMAIL_a91c4e2f7b03] ... refunded [EMAIL_5d7e08b1cc42]   # the defect, still visible
+```
+
+Measured on Provy's own judge: the unmasked judge separates those two cases ten times out of ten, flat
+labels separate them zero times out of ten, and stable tokens are back to ten out of ten.
+
+### What is not masked, and why
+
+Join keys pass through untouched: `session_id`, `span_id`, `parent_span_id`, `entity_id`, `agent`,
+`step_type`, `tool_name`. `entity_id` is what ties a trace to the outcome you later report for the same
+work item, and `agent` is what the fleet view groups by, so masking them would break reconciliation
+without protecting anything. **If a ticket or order id is itself sensitive to you, pass one that is
+already pseudonymous.** You choose what goes in that field.
+
+Numbers, booleans and dictionary keys are never touched either, so a contract condition graded on a
+number cannot be broken by masking.
+
+Names and postal addresses are **not** masked. No regular expression can find a name, so catching that
+class needs a named-entity pass (Microsoft Presidio is what most of the ecosystem uses) or a rule of
+your own:
+
+```python
+from provy import Rule, tokenizing_masker
+import re
+
+masker = tokenizing_masker(
+    secret=os.environ["MY_MASK_SECRET"],
+    rules=[*DEFAULT_RULES, Rule("account", re.compile(r"\bACC-\d{6}\b"))],
+)
+```
+
+### If your masker raises
+
+The payload is dropped and the failure is logged. This is the one place the SDK fails closed: sending
+data you believed was masked is worse than not sending it. Watch for `mask() raised` in your logs.
+
+---
+
 ## Quality scoring
 
 By default Provy runs the LLM-as-judge **server-side** on the traces you send — no SDK code, no key of yours. Configure criteria in **Eval Manager** and scores appear on the Quality page.
@@ -170,8 +241,8 @@ write_eval(
 
 ## API reference
 
-### `ProvyClient(ingest_key=None, base_url=None)`
-Reads `PROVY_API_KEY` / `PROVY_URL` from the environment when arguments are omitted (legacy `ARGUS_INGEST_KEY` / `ARGUS_URL` still work).
+### `ProvyClient(ingest_key=None, base_url=None, enabled=None, buffered=True, mask=None)`
+Reads `PROVY_API_KEY` / `PROVY_URL` from the environment when arguments are omitted (legacy `ARGUS_INGEST_KEY` / `ARGUS_URL` still work). `mask` runs on every payload before it is sent; see "Keeping sensitive values out of Provy".
 
 | Method | When to call |
 |---|---|
@@ -180,8 +251,11 @@ Reads `PROVY_API_KEY` / `PROVY_URL` from the environment when arguments are omit
 | `close_session(session_id, status="completed", result_summary=None, terminal_reason=None)` | end of the run |
 | `trace_fn(agent, step_type="agent_step")` | decorator that auto-traces a function |
 
-### `ProvyExporter(api_key, endpoint=None)`
-OTel `SpanExporter`. Attach to any `TracerProvider`. Needs the `otel` extra.
+### `ProvyExporter(api_key, endpoint=None, enabled=None, mask=None)`
+OTel `SpanExporter`. Attach to any `TracerProvider`. Needs the `otel` extra. Takes the same `mask` as the client, because span attributes carry your content too.
+
+### `tokenizing_masker(secret, rules=None)` / `redacting_masker(rules=None)`
+Maskers for the `mask` argument. Prefer the tokenizing one; see the section above for why.
 
 ### `evaluate_session_outputs(session_id, agent_outputs)`
 Client-side LLM-as-judge. Needs the `judge` extra and `ANTHROPIC_API_KEY`.

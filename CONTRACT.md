@@ -177,3 +177,49 @@ Applies to **both** transports, which each carried the bug independently:
 open until the session ends reports the session's remaining time rather than its own work: measured
 at 82–377s claimed against 9–23s of real work on the reference fleet. The SDK ends each span
 immediately; a caller building its own tracer must do the same.
+
+## Tenant-side masking, and the one thing it duplicates
+
+`provy/redact.py` gives a caller a `mask` hook that runs before anything leaves their process. It is
+additive: Provy masks credentials and common identifiers again on its own egress to a model provider,
+unconditionally, so a gap in a caller's masker is less early protection and never an open door.
+
+⛔ **`DEFAULT_RULES` DUPLICATES THE SERVER'S PATTERN LIST, AND THE SERVER IS THE SOURCE OF TRUTH.** The
+server list lives in `argus/web/lib/redact.ts` `DEFAULT_PATTERNS`. The copy is deliberate: the entire
+point of masking here is to run before anything reaches the server, and a client that has to ask the
+server what to mask has already sent the data it was trying to protect.
+
+That makes this a drift risk of the kind this document exists to record. What holds it:
+
+- `tests/test_redact.py` pins the rule names, so a change on this side is visible in a diff.
+- Nothing pins the server side. **If you add, remove or retune a pattern in `lib/redact.ts`, update
+  `provy/redact.py` in the same change** or write down here why you could not.
+- A drift is a degradation, not a break. Either the client masks something the server would not have
+  (harmless, the value never arrives) or it misses something the server still catches on egress.
+
+### Two behaviours a caller depends on, so do not change them quietly
+
+**Join keys are never masked.** `session_id`, `span_id`, `parent_span_id`, `entity_id`, `agent`,
+`step_type`, `tool_name`. `entity_id` joins a trace to the outcome reported for the same work item, and
+the server groups by `agent`, so masking either would break reconciliation on the server while looking
+like a privacy improvement on the client. `PROTECTED_KEYS` is pinned by a test.
+
+**The mask fails closed.** A masker that raises means the payload is dropped, counted and logged, not
+sent unmasked. Every other failure in this SDK degrades toward sending, because telemetry must not
+break a caller's agent. This one is the exception on purpose: a caller who configured a mask believes
+their data is protected, and sending it anyway is the one outcome worse than losing it.
+
+### Tokens over flat labels
+
+`tokenizing_masker` is the one to recommend and `redacting_masker` is the fallback. A flat label
+collapses every distinct value to one string, which makes "the agent acted for the right person"
+unanswerable from the trace. Measured against Provy's own judge on ten ITSM work items: unmasked
+separates a correct run from a wrong-person run 10 of 10 times, flat labels 0 of 10 (the two inputs are
+byte-identical, so this is structural and not a sampling result), stable tokens 10 of 10.
+
+⛔ **AND MASKING IS NOT FREE ON THE SERVER'S SIDE OF THE FENCE.** In the same measurement, masking names
+moved the server's `response_coherence` score by about seven times the judge's own run-to-run noise, and
+flipped 2 of 10 checks across their threshold. Tokenising does not help with that; its win is
+detectability. A tenant who turns masking on needs their affected thresholds re-baselined, which is a
+server-side conversation and not something this SDK can solve. Full numbers:
+`argus/docs/compliance/pii-plan.md` section 3a.
