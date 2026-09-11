@@ -223,3 +223,23 @@ flipped 2 of 10 checks across their threshold. Tokenising does not help with tha
 detectability. A tenant who turns masking on needs their affected thresholds re-baselined, which is a
 server-side conversation and not something this SDK can solve. Full numbers:
 `argus/docs/compliance/pii-plan.md` section 3a.
+
+### The two protected-key lists differ on purpose
+
+`provy/redact.py` `PROTECTED_KEYS` and `argus/web/lib/redact.ts` `PROTECTED_KEYS` are not the same set,
+and harmonising them would be a mistake in both directions. They protect different surfaces:
+
+- **This SDK masks the whole outbound body**, so `agent`, `step_type`, `tool_name` and `session_type`
+  are reachable by the masker and have to be named. They are identifiers the server groups and
+  attributes by.
+- **The server masks only `ag_traces.payload`.** `agent`, `step_type` and `tool_name` are their own
+  columns and are never handed to `redactDeep`, so naming them server-side would protect nothing. The
+  server list adds `external_id`, which is a session-resolution key this SDK does not put in a payload.
+
+The overlap that matters is the same in both: `entity_id`, `span_id`, `parent_span_id`, `session_id`.
+`entity_id` is the work-item key and has no column of its own on the server, so it rides inside the
+payload that at-rest masking rewrites. That is the one that bit us.
+
+⛔ **BEFORE ADDING A NAME TO EITHER LIST, CHECK WHICH SURFACE IT IS ON.** A name on the wrong list
+either does nothing or leaves content unmasked. Both lists are pinned by a test, so a change shows up
+in a diff on whichever side made it.
