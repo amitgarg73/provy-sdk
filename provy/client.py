@@ -42,6 +42,7 @@ import functools
 import threading
 import logging
 import requests
+from typing import Callable
 from .identity import agent_base
 from .transport import SpanBuffer, post_with_retry
 
@@ -155,6 +156,46 @@ except ImportError:
 log = logging.getLogger("provy.sdk")
 
 
+class _MaskGate:
+    """Runs the tenant's masker, counts what it had to drop, and is shared by both exit paths.
+
+    ⛔ IT FAILS CLOSED, AND IT IS THE ONE THING IN THIS SDK THAT DOES. Everywhere else the standing
+    rule is that telemetry must never break the caller's agent, so failures degrade toward sending. A
+    masker exists precisely to stop raw values reaching Provy, so one that raised and then sent the
+    data anyway would be worse than no masker at all: the caller believes their data is protected and
+    it is not. The payload is dropped instead.
+
+    ⛔ AND NEVER IN SILENCE. A masker that throws on every span means total data loss, and that is a
+    bug the caller has to see on the first occurrence, not infer from a gap in a dashboard next week.
+
+    One class rather than a method on each of the two senders, because the client and the OTel
+    exporter both hand customer content to the network and a second copy of this logic is how one of
+    them ends up without it.
+    """
+
+    __slots__ = ("_mask", "failures")
+
+    def __init__(self, mask: "Callable[[dict], dict] | None"):
+        self._mask = mask
+        self.failures = 0
+
+    def apply(self, payload):
+        """The masked payload, or None when the masker failed and the data must not be sent."""
+        if self._mask is None:
+            return payload
+        try:
+            return self._mask(payload)
+        except Exception as e:  # noqa: BLE001 — a caller's masker is arbitrary code
+            self.failures += 1
+            if self.failures in (1, 10, 100) or self.failures % 1000 == 0:
+                log.error(
+                    "provy: mask() raised (%s), so this payload was DROPPED rather than sent "
+                    "unmasked. %d dropped so far. Nothing reached Provy; fix the masker.",
+                    e, self.failures,
+                )
+            return None
+
+
 class ProvyExporter(SpanExporter):  # type: ignore[misc]
     """
     OTel SpanExporter. Attach to any TracerProvider; spans stream to Provy.
@@ -168,9 +209,12 @@ class ProvyExporter(SpanExporter):  # type: ignore[misc]
         provider.add_span_processor(BatchSpanProcessor(ProvyExporter(api_key="provy_...")))
     """
 
-    def __init__(self, api_key: str, endpoint: str | None = None, enabled: "bool | None" = None):
+    def __init__(self, api_key: str, endpoint: str | None = None, enabled: "bool | None" = None, mask: "Callable[[dict], dict] | None" = None):
         if not _OTEL_AVAILABLE:
             raise ImportError("opentelemetry-sdk and opentelemetry-api are required for ProvyExporter")
+        # Span attributes carry the customer's own content, so this path needs the masker as much as
+        # the direct client does. See provy.redact.
+        self._gate = _MaskGate(mask)
         self.api_key  = api_key
         self.endpoint = (endpoint or PROVY_BASE_URL).rstrip("/") + "/api/otlp/v1/traces"
         self._headers = {"x-provy-key": api_key, "Content-Type": "application/json"}
@@ -219,7 +263,10 @@ class ProvyExporter(SpanExporter):  # type: ignore[misc]
 
         payload = {"resourceSpans": [{"scopeSpans": [{"spans": otlp_spans}]}]}
         try:
-            r = requests.post(self.endpoint, json=payload, headers=self._headers, timeout=10)
+            masked = self._gate.apply(payload)
+            if masked is None:
+                return SpanExportResult.FAILURE
+            r = requests.post(self.endpoint, json=masked, headers=self._headers, timeout=10)
             r.raise_for_status()
             return SpanExportResult.SUCCESS  # type: ignore[attr-defined]
         except Exception:
@@ -242,10 +289,14 @@ class ProvyClient:
     the call graph when you are not using OTel.
     """
 
-    def __init__(self, ingest_key: str | None = None, base_url: str | None = None, enabled: "bool | None" = None, buffered: bool = True):
+    def __init__(self, ingest_key: str | None = None, base_url: str | None = None, enabled: "bool | None" = None, buffered: bool = True, mask: "Callable[[dict], dict] | None" = None):
         self.key  = ingest_key or os.environ.get("PROVY_API_KEY") or os.environ.get("ARGUS_INGEST_KEY", "")
         self.base = (base_url or PROVY_BASE_URL).rstrip("/")
         self._enabled = enabled
+        # Tenant-side masking. Nothing is masked unless you pass one; see provy.redact for the
+        # tokenizing masker and why a stable pseudonym beats a flat label. Provy masks again on the
+        # way out to a model provider regardless, so this is defence in depth, not the only layer.
+        self._gate = _MaskGate(mask)
         self._headers = {
             "x-provy-key":  self.key,
             "Content-Type": "application/json",
@@ -286,10 +337,9 @@ class ProvyClient:
             return str(uuid.uuid4())  # emission off: local id so caller code keeps working
         # Synchronous on purpose: the caller needs the id back. Retried, because losing a session
         # open loses every span that would have hung off it.
-        r = post_with_retry(
-            f"{self.base}/api/ingest/session/open",
+        r = self._post(
+            "/api/ingest/session/open",
             {"session_type": session_type, "external_id": external_id, "metadata": metadata},
-            self._headers,
         )
         if r is None or r.status_code >= 400:
             raise RuntimeError(
@@ -400,14 +450,28 @@ class ProvyClient:
         if self._buffer is not None:
             self._buffer.add(body)
         else:
-            post_with_retry(f"{self.base}/api/ingest/trace", body, self._headers)
+            self._post("/api/ingest/trace", body)
         return span_id
 
     # ---- transport ---------------------------------------------------------
 
+    def _post(self, path: str, payload, *, timeout: float = 10.0):
+        """⛔ THE ONLY PLACE THIS SDK SENDS ANYTHING. Masks first, then posts.
+
+        The boundary is here rather than at the seven call sites because the server learned this the
+        expensive way (#421): redaction sat inside two funnels, fifteen call sites built their own
+        client around them, and every one of them sent raw tenant content for the whole life of the
+        feature. A rule that every caller has to remember is a rule that gets forgotten.
+        `tests/test_mask_boundary.py` fails if any other method in this module posts directly.
+        """
+        masked = self._gate.apply(payload)
+        if masked is None:
+            return None
+        return post_with_retry(f"{self.base}{path}", masked, self._headers, timeout=timeout)
+
     def _send_spans(self, batch: list[dict]) -> bool:
         """Deliver one batch of spans. Returns False when they are lost, so the buffer can count."""
-        r = post_with_retry(f"{self.base}/api/ingest/trace", batch, self._headers)
+        r = self._post("/api/ingest/trace", batch)
         return r is not None and r.status_code < 400
 
     def flush(self) -> None:
@@ -439,10 +503,9 @@ class ProvyClient:
         # computes a verdict over a run whose steps have not arrived. This ordering is what makes
         # buffering safe rather than a race.
         self.flush()
-        r = post_with_retry(
-            f"{self.base}/api/ingest/session/close",
+        r = self._post(
+            "/api/ingest/session/close",
             {"session_id": session_id, "result_summary": result_summary, "terminal_reason": terminal_reason},
-            self._headers,
         )
         if r is None or r.status_code >= 400:
             log.error("provy: could not close session %s after retries", session_id)
@@ -481,7 +544,7 @@ class ProvyClient:
         if detail    is not None: body["detail"]    = detail
         if threshold is not None: body["threshold"] = threshold
 
-        r = post_with_retry(f"{self.base}/api/ingest/eval", body, self._headers)
+        r = self._post("/api/ingest/eval", body)
         if r is None or r.status_code >= 400:
             log.error("provy: eval ingest failed after retries")
 
@@ -526,7 +589,7 @@ class ProvyClient:
         if occurred_at   is not None: body["occurred_at"]   = occurred_at
         if business_date is not None: body["business_date"] = business_date
 
-        r = post_with_retry(f"{self.base}/api/ingest/outcome", body, self._headers)
+        r = self._post("/api/ingest/outcome", body)
         if r is None or r.status_code >= 400:
             log.error("provy: outcome ingest failed after retries")
 

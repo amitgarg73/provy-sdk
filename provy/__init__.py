@@ -20,6 +20,15 @@ from typing import Any
 from provy.client import ProvyClient, ProvyExporter
 from provy.session import TraceLogger
 from provy.evals import write_eval
+from provy.redact import (
+    tokenizing_masker,
+    redacting_masker,
+    tokenize_text,
+    redact_text,
+    token_for,
+    DEFAULT_RULES,
+    Rule,
+)
 
 # ⛔ DERIVED, NEVER HARDCODED (#3). This used to be a literal, and 0.5.1 bumped pyproject.toml and
 # not this line, so a correctly-patched install reported "0.5.0". That is worse than a stale string:
@@ -83,6 +92,15 @@ __all__ = [
     "ProvyExporter",
     "TraceLogger",
     "write_eval",
+    # tenant-side masking. tokenizing_masker is the one to reach for: a stable pseudonym keeps
+    # "is this the same person" answerable, which a flat label destroys. See provy/redact.py.
+    "tokenizing_masker",
+    "redacting_masker",
+    "tokenize_text",
+    "redact_text",
+    "token_for",
+    "DEFAULT_RULES",
+    "Rule",
     # LLM-as-judge (extra: judge)
     "evaluate_session_outputs",
     # local engine (extra: engine)
