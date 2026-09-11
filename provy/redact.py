@@ -234,8 +234,44 @@ def _walk(value: Any, fn: Callable[[str], str], depth: int = 0) -> Any:
     return value
 
 
+#: Shorter than this and the pseudonym is not one. 16 characters of hex is 64 bits, which is the point
+#: below which guessing the secret becomes cheaper than guessing the values it protects.
+MIN_SECRET_CHARS = 16
+
+
 def tokenizing_masker(secret: str, rules: Iterable[Rule] | None = None) -> Callable[[dict], dict]:
-    """The masker to pass as `ProvyClient(mask=...)`. Stable pseudonyms, joins preserved."""
+    """The masker to pass as `ProvyClient(mask=...)`. Stable pseudonyms, joins preserved.
+
+    ⛔ THE SECRET IS CHECKED HERE, WHEN YOU BUILD THE MASKER, AND NOT ON THE FIRST SPAN. That ordering is
+    the whole point of this function existing rather than a bare lambda.
+
+    `tokenize_text` refuses an empty secret, which is correct. But if that refusal happens on the first
+    span it happens INSIDE the mask gate, which fails closed and drops the payload. So this:
+
+        client = ProvyClient(mask=tokenizing_masker(os.environ.get("MY_MASK_SECRET")))
+
+    with the environment variable unset or misspelled builds a perfectly good client and then silently
+    discards every span for the life of the process. The exception is logged, but a caller who is not
+    reading logs sees a working agent and an empty dashboard, which is the precise failure this SDK's
+    transport module was written to make impossible.
+
+    Raising at construction puts the error next to the mistake. It is also the one place in this module
+    where raising into the caller is right: this runs once, at wiring time, not on the telemetry path.
+    """
+    if not secret or not isinstance(secret, str):
+        raise ValueError(
+            "tokenizing_masker needs a secret and was given "
+            f"{secret!r}. The usual cause is an environment variable that is unset or misspelled. "
+            "Generate one once (`python -c \"import secrets; print(secrets.token_hex(32))\"`), keep it "
+            "somewhere durable, and never change it: rotating it re-keys every token, so the same person "
+            "before and after becomes two different people."
+        )
+    if len(secret) < MIN_SECRET_CHARS:
+        raise ValueError(
+            f"tokenizing_masker needs a secret of at least {MIN_SECRET_CHARS} characters; got "
+            f"{len(secret)}. A short secret is guessable, and a guessable secret makes the tokens "
+            "reversible by anyone holding your stored traces, which is the one thing they exist to prevent."
+        )
     return lambda body: _walk(body, lambda s: tokenize_text(s, secret, rules))
 
 

@@ -152,6 +152,28 @@ class TestSecretIsRequired:
         with pytest.raises(ValueError, match="secret"):
             tokenize_text("ada@example.com", "")
 
+    @pytest.mark.parametrize("bad", ["", None, "short"])
+    def test_the_masker_refuses_when_it_is_built_not_on_the_first_span(self, bad):
+        """⛔ THE ORDERING IS THE BUG THIS PREVENTS, NOT THE VALIDATION ITSELF.
+
+        `tokenize_text` already refused an empty secret. But that refusal landed on the first span,
+        inside the mask gate, which fails closed and drops the payload. So a client built with a
+        misspelled environment variable constructed cleanly and then discarded EVERY span for the life
+        of the process, with nothing but a log line to say so. A working agent and an empty dashboard is
+        the exact failure this SDK's transport module exists to make impossible.
+        """
+        with pytest.raises(ValueError):
+            tokenizing_masker(bad)
+
+    def test_a_valid_secret_still_builds(self):
+        assert tokenizing_masker("a" * 32)({"n": "ada@example.com"})["n"].startswith("[EMAIL_")
+
+    def test_the_message_names_the_likely_cause(self):
+        # The overwhelmingly common cause is an unset env var, so the error says so rather than
+        # leaving the reader to work it out from "needs a secret".
+        with pytest.raises(ValueError, match="environment variable"):
+            tokenizing_masker(None)
+
 
 class TestRulesMirrorTheServer:
     def test_rule_names_are_pinned_so_a_drift_from_the_server_is_visible(self):
