@@ -167,3 +167,27 @@ class TestForwardClaim:
     def test_no_claim_leaves_the_payload_untouched(self):
         captured = self._emit("log_agent_message", "risk", "r", "ok")
         assert "provy_claim" not in captured[-1]["payload"]
+
+
+class TestUntimedSteps:
+    """provy-sdk#4: a step nobody timed is sent as "not timed", never as 0 ms."""
+
+    def test_tool_call_without_a_duration_sends_null(self):
+        tracer, rows = _make_tracer()
+        with patch("provy.db.get_client", return_value=tracer._db):
+            tracer.log_tool_call("research", "web_search", {"q": "x"}, {"hits": 1})
+        assert rows[-1]["latency_ms"] is None
+
+    def test_a_given_duration_is_sent(self):
+        tracer, rows = _make_tracer()
+        with patch("provy.db.get_client", return_value=tracer._db):
+            tracer.log_tool_call("research", "web_search", {"q": "x"}, {"hits": 1}, latency_ms=320)
+        assert rows[-1]["latency_ms"] == 320
+
+    def test_time_step_times_the_block(self):
+        tracer, _ = _make_tracer()
+        import time as _t
+        with tracer.time_step() as t:
+            assert t.ms is None
+            _t.sleep(0.02)
+        assert t.ms is not None and t.ms >= 15

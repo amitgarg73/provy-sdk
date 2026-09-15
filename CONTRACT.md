@@ -104,6 +104,17 @@ does not state is a shape nobody can check.
 }
 ```
 
+## A step's duration: absent means "not timed" (#4)
+
+`latency_ms` on a trace row is how long the step took, in milliseconds, **or null when nobody timed it**.
+Provy reads a null or zero duration as "not timed" and leaves the step out of latency grading, so its
+coverage shows as unmeasured rather than as instant.
+
+⛔ **The manual `TraceLogger` used to default it to 0**, so a caller who forgot the argument sent
+"timed and instant" with no warning. From 0.7.1 it defaults to None and the row carries null.
+`TraceLogger.time_step()` times a block and hands back the milliseconds. The auto-instrumented path in
+`client.py` always timed its calls and is unchanged.
+
 ## The work-item address (#733)
 
 A ledger row is keyed by `(tenant_id, workflow_id, entity_id, business_date)` and that tuple is

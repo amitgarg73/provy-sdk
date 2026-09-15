@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+from contextlib import contextmanager
 from datetime import date, datetime
 from typing import Any, Optional
 from uuid import uuid4
@@ -115,6 +117,14 @@ def _estimate_cost(
     ) / 1_000_000
 
 
+class _StepTimer:
+    """What `TraceLogger.time_step()` yields: `ms` is set when the block ends."""
+    __slots__ = ("ms",)
+
+    def __init__(self) -> None:
+        self.ms: Optional[int] = None
+
+
 class TraceLogger:
     """
     Writes structured trace rows to ag_traces and a summary row to ag_sessions.
@@ -155,6 +165,24 @@ class TraceLogger:
 
     # ── Public API ──────────────────────────────────────────────────────────────
 
+    @contextmanager
+    def time_step(self):
+        """Time a block, then pass the result as `latency_ms`.
+
+            with tracer.time_step() as t:
+                result = search(query)
+            tracer.log_tool_call("research", "web_search", {"query": query}, result, latency_ms=t.ms)
+
+        `t.ms` is None until the block ends, so logging inside the block sends "not timed" rather than a
+        wrong number. Monotonic clock: a wall-clock change mid-call cannot make it negative.
+        """
+        timer = _StepTimer()
+        start = time.monotonic()
+        try:
+            yield timer
+        finally:
+            timer.ms = int((time.monotonic() - start) * 1000)
+
     def start_agent_span(self, agent: str) -> str:
         """Register a new span for this agent. Returns the new span_id."""
         span_id = str(uuid4())
@@ -168,10 +196,15 @@ class TraceLogger:
         tool_input: dict,
         tool_output: Any,
         entity_id: Optional[str] = None,
-        latency_ms: int = 0,
+        latency_ms: Optional[int] = None,
         model: Optional[str] = None,
     ) -> str:
-        """Write a tool_call row. Returns the new span_id."""
+        """Write a tool_call row. Returns the new span_id.
+
+        `latency_ms` is how long the call took. Leave it out if you did not time it: an untimed call is
+        sent as "not timed", never as 0 ms, which would read as timed and instant. `time_step()` times a
+        block for you.
+        """
         return self._write({
             "step_type":   "tool_call",
             "agent":       agent,
@@ -192,7 +225,7 @@ class TraceLogger:
         tokens_input: int = 0,
         tokens_output: int = 0,
         model: Optional[str] = None,
-        latency_ms: int = 0,
+        latency_ms: Optional[int] = None,
         payload: Optional[dict] = None,
         claim: Optional[Any] = None,
     ) -> str:
@@ -224,7 +257,7 @@ class TraceLogger:
         agent: str,
         outcome: str,
         detail: Optional[dict] = None,
-        latency_ms: int = 0,
+        latency_ms: Optional[int] = None,
         model: Optional[str] = None,
         claim: Optional[Any] = None,
     ) -> str:
@@ -491,7 +524,9 @@ class TraceLogger:
             "tool_name":     fields.get("tool_name"),
             "outcome":       fields.get("outcome"),
             "error":         fields.get("error"),
-            "latency_ms":    fields.get("latency_ms", 0),
+            # None when the caller did not time the step (provy-sdk#4): Provy reads a missing duration as
+            # "not timed". A 0 here used to read as timed and instant.
+            "latency_ms":    fields.get("latency_ms"),
             "tokens_input":  tokens_input,
             "tokens_output": tokens_output,
             "cost_usd":      cost_usd,
