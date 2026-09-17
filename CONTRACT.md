@@ -184,6 +184,29 @@ Applies to **both** transports, which each carried the bug independently:
 - OTel — `client.py`, choosing the parent span for the OTel context.
 - REST — `session.py`, setting `parent_span_id` on the payload.
 
+## Input edges: `input_span_ids` / `inputs=` (argus#1009)
+
+`trace(..., inputs=[span_id, ...])` declares **which spans' output this step consumed**. It is sent
+as `input_span_ids` on the REST body and as OTel **span links** on the OTLP path, and the server
+stores both into `ag_traces.input_span_ids`.
+
+⛔ **This is NOT `parent_span_id`, and the server must never conflate them.** `parent_span_id` is the
+CALL TREE — this step ran inside that one. `input_span_ids` is a DATA dependency between steps that
+are usually siblings: the risk step did not run inside the research step, it read what research
+produced. A handoff is not nesting.
+
+⛔ **NULL and `[]` are different claims and both must survive the round trip.** NULL is "this client
+declared nothing", which is every span written before this field existed. `[]` is "this step read
+nothing". Collapsing them turns a silent absence into a positive statement about the pipeline's
+shape. The SDK omits the key entirely when `inputs` is not passed, and sends `[]` only when the
+caller passes `[]`.
+
+**Why it exists.** Without a declared input edge, the only downstream signal is position, and "ran
+later" is not "was affected by". Provy has twice had to remove logic that treated those as the same,
+once when every agent in a session was charged with one agent's incident. Measured before this
+shipped: across 8,337 production spans and 256 sessions there were **zero** edges between two
+different agents — every cross-agent-looking parent edge was one agent fanning out per work item.
+
 ⛔ **A span must still be ended when its agent finishes**, not swept at session close. A span held
 open until the session ends reports the session's remaining time rather than its own work: measured
 at 82–377s claimed against 9–23s of real work on the reference fleet. The SDK ends each span

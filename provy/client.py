@@ -371,11 +371,31 @@ class ProvyClient:
         claim:          dict | list | None = None,
         parent_trace_id: str | None = None,
         entity_id:      str | None = None,
+        inputs:         list[str] | None = None,
     ) -> str:
         """Log a trace step. Returns the span_id for this step (use as parent_trace_id for children).
 
         Pass entity_id (the work-item key: trade/order id, ticket id) to join this trace to the
         outcome you later report for the same item, so per-item quality and reconciliation link up.
+
+        Pass `inputs` as the span ids whose OUTPUT this step consumed — the values `trace()` returned
+        for the steps you read from. This is what lets Provy say a later failure was caused by an
+        earlier one instead of merely following it.
+
+        ⛔ `inputs` IS NOT `parent_trace_id`, AND THE DIFFERENCE IS THE WHOLE POINT (argus#1009).
+        `parent_trace_id` is the CALL TREE: this step ran inside that one. `inputs` is a DATA
+        dependency between steps that are usually siblings: the risk step did not run inside the
+        research step, it read what research produced.
+
+        Without it, Provy can only see which steps ran after which, and "ran later" is not "was
+        affected by". Provy has twice had to remove logic that treated the two as the same, once
+        when every agent in a session was charged with one agent's incident — an orchestrator
+        showing an 87%% incident rate having caused none of them.
+
+        Example::
+
+            research = p.trace(agent="research", step_type="decision", outcome="ok")
+            p.trace(agent="risk", step_type="decision", outcome="ok", inputs=[research])
         """
         if not _emit_enabled(self._enabled):
             # Still hand back a real id. Its documented job is to be passed as parent_trace_id, and
@@ -404,7 +424,28 @@ class ProvyClient:
                 parent_span = None
 
             ctx = otel_trace.set_span_in_context(parent_span) if parent_span else otel_ctx_api.context.Context()  # type: ignore[attr-defined]
-            span = self._tracer.start_span(f"{agent}:{step_type}", context=ctx)  # type: ignore[union-attr]
+
+            # ⛔ INPUTS BECOME OTel LINKS, NOT A SECOND PARENT. A span has one parent and it means
+            # "ran inside"; a link is a causal reference between spans that are usually siblings,
+            # which is exactly the relationship here. Sending it as a link means a tenant whose
+            # telemetry goes through the OTLP gateway gets this for free, with no Provy-specific
+            # attribute to learn (argus#1009).
+            #
+            # The trace id is carried from the current span's context: an input span always belongs
+            # to the same trace, because it is an earlier step of the same session.
+            links = None
+            if inputs:
+                from opentelemetry.trace import Link, SpanContext, TraceFlags  # type: ignore[import]
+                _trace_id = parent_span.get_span_context().trace_id if parent_span else None  # type: ignore[union-attr]
+                if _trace_id:
+                    links = [
+                        Link(SpanContext(trace_id=_trace_id, span_id=int(sid, 16),
+                                         is_remote=False, trace_flags=TraceFlags(0x01)))
+                        for sid in inputs
+                        if isinstance(sid, str) and len(sid) == 16
+                    ] or None
+
+            span = self._tracer.start_span(f"{agent}:{step_type}", context=ctx, links=links)  # type: ignore[union-attr]
 
             sc = span.get_span_context()
             span_id        = format(sc.span_id, "016x")
@@ -444,6 +485,13 @@ class ProvyClient:
             span_id = uuid.uuid4().hex[:16]
         body["span_id"] = span_id
         if parent_span_id: body["parent_span_id"] = parent_span_id
+        # ⛔ OMITTED WHEN THE CALLER SAYS NOTHING, SENT AS [] WHEN THEY SAY "NOTHING". The server
+        # stores NULL for the first and an empty array for the second, and they are different
+        # claims: one is a client that has not adopted the field, the other is a step that really
+        # did read nothing. Defaulting `inputs=None` to `[]` here would make every un-migrated
+        # caller start asserting the second.
+        if inputs is not None:
+            body["input_span_ids"] = [s for s in inputs if isinstance(s, str) and s]
 
         # Buffered by default. Returns the locally generated span id, so the caller's call graph is
         # correct whether or not the span has reached the server yet.
