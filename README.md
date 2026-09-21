@@ -83,7 +83,7 @@ session_id = provy.open_session("premarket")
 provy.trace(
     session_id = session_id,
     agent      = "research",
-    step_type  = "agent_step",          # llm_call | tool_call | agent_step | decision | error
+    step_type  = "agent_message",       # tool_call | agent_message | decision | error | skip
     outcome    = "Generated AAPL thesis",
     latency_ms = 1240,
     tokens_in  = 800,
@@ -95,10 +95,23 @@ provy.close_session(session_id, result_summary="Trade plan ready")
 
 Open **Sessions** in Provy — your run appears within seconds.
 
+### `step_type` is a closed set, and a wrong value is silent
+
+`tool_call` · `agent_message` · `decision` · `error` · `skip`
+
+Provy reasons about these five and nothing outside them. A step typed anything else is accepted,
+stored and shown in the UI, and is then **invisible to attribution, the judge, pattern detection and
+embeddings**. Nothing errors; you simply never get a cause named on that step.
+
+This README advertised `agent_step` and `llm_call` until 0.9.0. Neither is real. `agent_step` was
+also the worked example and the `trace_fn` default, so following this document produced a fleet whose
+steps Provy could not reason about. The client now logs a warning naming the value and the likely
+replacement. There is no step type meaning "a model call": use `agent_message` and set `model`.
+
 The decorator form auto-traces a function:
 
 ```python
-@provy.trace_fn(agent="research", step_type="agent_step")
+@provy.trace_fn(agent="research", step_type="agent_message")
 def run_research(ticker):
     ...
 
@@ -247,9 +260,53 @@ Reads `PROVY_API_KEY` / `PROVY_URL` from the environment when arguments are omit
 | Method | When to call |
 |---|---|
 | `open_session(session_type, external_id=None, metadata=None)` | start of a run; returns `session_id` |
-| `trace(session_id, agent, step_type, outcome, ...)` | each step; returns the span id |
+| `trace(...)` | each step; returns the span id. Full signature below |
 | `close_session(session_id, status="completed", result_summary=None, terminal_reason=None)` | end of the run |
-| `trace_fn(agent, step_type="agent_step")` | decorator that auto-traces a function |
+| `report_outcome(entity_id, label=None, value=None, signals=None, session_id=None, source="confirmed", occurred_at=None, business_date=None)` | what actually happened, from your system of record |
+| `trace_fn(agent, step_type="agent_message")` | decorator that auto-traces a function |
+
+#### `report_outcome` is how anything gets reconciled
+
+It was missing from this table until 0.9.0, and the "Business outcomes" section below showed
+`write_eval()` instead, which is a different thing: an eval row, not a settled result. Until an
+outcome arrives the Ledger stays empty, nothing can diverge and no cause can be named, so a reader
+who trusted the old table built an integration that could never reconcile.
+
+`signals` is a dict of the named values your system of record settles on, and a contract condition
+binds to one of those names. `business_date` is the day the work ran, not the day you report it.
+
+#### `trace` in full
+
+```python
+trace(session_id, agent, step_type, outcome,
+      tool_name=None, latency_ms=None, tokens_in=None, tokens_out=None, cost_usd=None,
+      error=None, output_json=None, claim=None, parent_trace_id=None, entity_id=None,
+      inputs=None, model=None, prompt_version=None,
+      cache_read_tokens=None, cache_write_tokens=None) -> str
+```
+
+This table used to read `trace(session_id, agent, step_type, outcome, ...)` with the rest a literal
+ellipsis, which hid the four arguments that decide whether a fleet can be reconciled or attributed
+at all:
+
+| argument | why it matters |
+|---|---|
+| `entity_id` | the work item this step is about. Without it a step cannot be joined to the outcome you later report, so nothing reconciles per item |
+| `claim` | what the agent says will hold, `{"signal": ..., "value": ...}`. This is what lets Provy put a broken condition against an agent by name. Claims cost nothing and buy attribution |
+| `inputs` | span ids whose output this step consumed. This is what tells "caused by" from "came after". **Omit it to say nothing; pass `[]` to say this step read nothing.** Those are different claims and the server stores them differently |
+| `output_json` | the step's own reported values. Contract conditions bind to these names on the trace side |
+
+`model`, `prompt_version`, `cache_read_tokens` and `cache_write_tokens` are each stored in their own
+column and were **not expressible from this client until 0.9.0**. They must never be buried inside
+`output_json`: anything in there is dropped once the trace body moves to object storage, which is how
+model names were lost.
+
+`outcome` is **required** here, positionally, even though the help docs list it as optional. Pass a
+short verdict word.
+
+Every step is given a `span_id` whether or not the `otel` extra is installed, and the server dedupes
+on `(tenant, session, span_id)`, so a retry after a lost response replaces the step instead of
+recording it twice. You do not pass one and do not need to.
 
 ### `ProvyExporter(api_key, endpoint=None, enabled=None, mask=None)`
 OTel `SpanExporter`. Attach to any `TracerProvider`. Needs the `otel` extra. Takes the same `mask` as the client, because span attributes carry your content too.

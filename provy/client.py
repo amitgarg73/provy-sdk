@@ -44,6 +44,25 @@ import logging
 import requests
 from typing import Callable
 from .identity import agent_base
+
+#: The step types Provy reasons about, and nothing outside this set.
+#:
+#: ⛔ A STEP TYPED ANYTHING ELSE IS ACCEPTED AND THEN INVISIBLE. The server stores it and the UI
+#: shows it, and it is then skipped by attribution, the judge, pattern detection and embeddings. No
+#: error is raised at any layer, so the failure is silent for the life of the integration.
+#:
+#: This set did not exist in this package until argus#1071. The README's quickstart advertised
+#: `agent_step` and `llm_call`, neither of which is real, `agent_step` was the worked example AND the
+#: `trace_fn` default, and `agent_message` and `skip` were missing from the list entirely. An outside
+#: integration caught it only by reading the TypeScript SDK, whose type union is exhaustive.
+STEP_TYPES: frozenset[str] = frozenset({"tool_call", "agent_message", "decision", "error", "skip"})
+
+#: What people write when they mean one of the above. Warned about by name, never silently rewritten:
+#: guessing at a caller's intent is how a step ends up filed under something they did not choose.
+STEP_TYPE_LOOKALIKES = {
+    "agent_step": "agent_message", "llm_call": "agent_message",
+    "agent_reasoning": "agent_message", "tool": "tool_call",
+}
 from .transport import SpanBuffer, post_with_retry
 
 # ⛔ `PROVY_BASE_URL` IS ACCEPTED BECAUSE IT IS THE OBVIOUS GUESS, AND THE WRONG GUESS WAS SILENT.
@@ -372,6 +391,10 @@ class ProvyClient:
         parent_trace_id: str | None = None,
         entity_id:      str | None = None,
         inputs:         list[str] | None = None,
+        model:          str | None = None,
+        prompt_version: str | None = None,
+        cache_read_tokens:  int | None = None,
+        cache_write_tokens: int | None = None,
     ) -> str:
         """Log a trace step. Returns the span_id for this step (use as parent_trace_id for children).
 
@@ -456,6 +479,20 @@ class ProvyClient:
             self._agent_spans[agent] = span
             span.end()
 
+        # ⛔ SAY SO WHEN A STEP WILL BE INVISIBLE (argus#1071). Warn rather than raise: an existing
+        # caller sending `agent_step` today would break on upgrade, and breaking a customer's agent
+        # over telemetry is the wrong trade. But silence here is what let a whole integration be
+        # typed `agent_step` with nothing to read it.
+        if step_type not in STEP_TYPES:
+            _suggest = STEP_TYPE_LOOKALIKES.get(step_type)
+            log.warning(
+                "provy: step_type=%r is not one Provy reasons about (%s).%s "
+                "The step is stored and shown, and is invisible to attribution, the judge, "
+                "pattern detection and embeddings.",
+                step_type, ", ".join(sorted(STEP_TYPES)),
+                f" Did you mean {_suggest!r}?" if _suggest else "",
+            )
+
         body: dict = {
             "session_id":    session_id,
             "agent":         agent,
@@ -470,6 +507,24 @@ class ProvyClient:
             "output_json":   _with_claim(output_json, claim),
             "entity_id":     entity_id,
         }
+        # ⛔ TOP LEVEL, NEVER INSIDE output_json, AND THIS CLIENT COULD NOT SEND THEM AT ALL UNTIL NOW.
+        #
+        # The server stores each of these in its own column and the docs warn in both other doors
+        # that anything left inside the payload is dropped when the trace body moves to object
+        # storage, "which is how every model name ever sent was lost". The Python client had no
+        # parameter for any of the four, so the one door that could not express them was the one
+        # whose customers were never warned.
+        #
+        # Found by an outside integration (argus#1071) that put them in `output_json` under `_model`
+        # and `_prompt_version` because it had nowhere else to go, and wrote down that it expected
+        # them to be dropped. Two of its five agents were model steps.
+        #
+        # Omitted rather than sent as null, so a caller that does not set them asserts nothing.
+        for _k, _v in (("model", model), ("prompt_version", prompt_version),
+                       ("cache_read_tokens", cache_read_tokens),
+                       ("cache_write_tokens", cache_write_tokens)):
+            if _v is not None:
+                body[_k] = _v
         # ⛔ EVERY SPAN CARRIES AN ID, EVEN WITHOUT OpenTelemetry INSTALLED. The server dedupes on
         # (tenant_id, session_id, span_id) and deliberately does NOT collapse spans that arrive
         # without an id, because a step that did not identify itself cannot be deduped. Since
@@ -643,8 +698,24 @@ class ProvyClient:
 
     # ---- Decorator --------------------------------------------------------
 
-    def trace_fn(self, agent: str, step_type: str = "agent_step"):
-        """Decorator that auto-traces a function call."""
+    def trace_fn(self, agent: str, step_type: str = "agent_message"):
+        """Decorator that auto-traces a function call.
+
+        ⛔ THE DEFAULT USED TO BE `agent_step`, WHICH THE PRODUCT DOES NOT REASON ABOUT.
+
+        Provy reasons about five step types and nothing outside them: tool_call, agent_message,
+        decision, error, skip. A step typed anything else is accepted, stored and shown, and is then
+        invisible to attribution, the judge, pattern detection and embeddings.
+
+        So the decorator whose whole purpose is effortless instrumentation defaulted to the one
+        value that makes the instrumentation inert, and nothing anywhere said so. An outside
+        integration spotted it by reading the TypeScript SDK's type union and declined to use this
+        decorator at all (argus#1071).
+
+        `agent_message` is the closest true value: the decorator wraps a function call and cannot
+        know whether it hit a tool, so it claims the general one rather than a wrong specific one.
+        Pass `step_type="tool_call"` when it did.
+        """
         def decorator(fn):
             @functools.wraps(fn)
             def wrapper(*args, session_id: str | None = None, **kwargs):
