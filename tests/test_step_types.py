@@ -143,3 +143,58 @@ class TestTheReadmeAgreesWithTheCode:
         readme = self._readme()
         for arg in ("entity_id", "claim", "inputs", "output_json", "model", "prompt_version"):
             assert arg in readme, f"README never mentions trace({arg}=...)"
+
+
+class TestWhenTheWorkActuallyRan:
+    """
+    Late telemetry is not telemetry about now (argus#1072).
+
+    ⛔ THE OTel DOOR HAS ALWAYS CARRIED THE SPAN'S OWN CLOCK and this one could not, so the door we
+    recommend was the door that lost the time. A collector catching up after an outage was recorded
+    as a burst of work at the moment it drained.
+    """
+
+    def test_a_step_can_say_when_it_ran(self, monkeypatch):
+        c, sent = _client(monkeypatch)
+        c.trace(session_id="s", agent="a", step_type="tool_call", outcome="ok",
+                occurred_at="2026-09-08T06:20:41Z")
+        assert sent[-1]["occurred_at"] == "2026-09-08T06:20:41Z"
+
+    def test_omitted_when_not_given_so_the_server_stamps_arrival(self, monkeypatch):
+        c, sent = _client(monkeypatch)
+        c.trace(session_id="s", agent="a", step_type="tool_call", outcome="ok")
+        assert "occurred_at" not in sent[-1]
+
+    def test_a_session_can_say_when_it_ran(self, monkeypatch):
+        c = ProvyClient(ingest_key="k", base_url="http://example.invalid",
+                        buffered=False, enabled=True)
+        seen = {}
+
+        class _R:
+            status_code = 200
+            @staticmethod
+            def json():
+                return {"session_id": "sid"}
+
+        def _post(path, payload, **kw):
+            seen["path"], seen["payload"] = path, payload
+            return _R()
+
+        monkeypatch.setattr(c, "_post", _post)
+        c.open_session("invoice_audit", started_at="2026-09-08T06:20:41Z")
+        assert seen["payload"]["started_at"] == "2026-09-08T06:20:41Z"
+
+    def test_a_session_omits_it_when_running_now(self, monkeypatch):
+        c = ProvyClient(ingest_key="k", base_url="http://example.invalid",
+                        buffered=False, enabled=True)
+        seen = {}
+
+        class _R:
+            status_code = 200
+            @staticmethod
+            def json():
+                return {"session_id": "sid"}
+
+        monkeypatch.setattr(c, "_post", lambda path, payload, **kw: (seen.update(payload=payload), _R())[1])
+        c.open_session("invoice_audit")
+        assert "started_at" not in seen["payload"]

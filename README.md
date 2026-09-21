@@ -259,7 +259,7 @@ Reads `PROVY_API_KEY` / `PROVY_URL` from the environment when arguments are omit
 
 | Method | When to call |
 |---|---|
-| `open_session(session_type, external_id=None, metadata=None)` | start of a run; returns `session_id` |
+| `open_session(session_type, external_id=None, metadata=None, started_at=None)` | start of a session; returns `session_id` |
 | `trace(...)` | each step; returns the span id. Full signature below |
 | `close_session(session_id, status="completed", result_summary=None, terminal_reason=None)` | end of the run |
 | `report_outcome(entity_id, label=None, value=None, signals=None, session_id=None, source="confirmed", occurred_at=None, business_date=None)` | what actually happened, from your system of record |
@@ -282,7 +282,7 @@ trace(session_id, agent, step_type, outcome,
       tool_name=None, latency_ms=None, tokens_in=None, tokens_out=None, cost_usd=None,
       error=None, output_json=None, claim=None, parent_trace_id=None, entity_id=None,
       inputs=None, model=None, prompt_version=None,
-      cache_read_tokens=None, cache_write_tokens=None) -> str
+      cache_read_tokens=None, cache_write_tokens=None, occurred_at=None) -> str
 ```
 
 This table used to read `trace(session_id, agent, step_type, outcome, ...)` with the rest a literal
@@ -303,6 +303,23 @@ model names were lost.
 
 `outcome` is **required** here, positionally, even though the help docs list it as optional. Pass a
 short verdict word.
+
+#### Telemetry that arrives late
+
+`occurred_at` on a step and `started_at` on a session say when the work actually ran, ISO 8601. Send
+them whenever it did not just happen: a queue that fell behind, a collector catching up after an
+outage, a history upload.
+
+Without them the server stamps arrival. Late telemetry is then recorded as a burst of work at the
+moment it drained, and everything read from that clock (the activity chart, "running less than
+usual", drift windows) describes Provy's ingestion rather than your agents. It is most wrong right
+after an upstream incident, which is when you will be looking hardest.
+
+A time in the future is refused server-side and falls back to arrival, with five minutes of clock
+skew allowed.
+
+Outcomes have carried their own dating all along: `business_date` for the day the work ran and
+`occurred_at` for when it settled.
 
 Every step is given a `span_id` whether or not the `otel` extra is installed, and the server dedupes
 on `(tenant, session, span_id)`, so a retry after a lost response replaces the step instead of

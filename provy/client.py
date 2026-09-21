@@ -351,15 +351,25 @@ class ProvyClient:
         session_type: str,
         external_id:  str | None = None,
         metadata:     dict | None = None,
+        started_at:   str | None = None,
     ) -> str:
+        """Open a session and return its id.
+
+        `started_at` is when the work actually ran, ISO 8601. Send it whenever the session is not
+        happening right now: a queue that fell behind, a collector catching up after an outage, a
+        history upload (argus#1072). Without it the server stamps arrival, so late telemetry is
+        recorded as a burst at the moment it drained and every activity, recency and drift reading
+        describes Provy's ingestion rather than your agents. A time in the future is refused
+        server-side and falls back to arrival.
+        """
         if not _emit_enabled(self._enabled):
             return str(uuid.uuid4())  # emission off: local id so caller code keeps working
         # Synchronous on purpose: the caller needs the id back. Retried, because losing a session
         # open loses every span that would have hung off it.
-        r = self._post(
-            "/api/ingest/session/open",
-            {"session_type": session_type, "external_id": external_id, "metadata": metadata},
-        )
+        payload: dict = {"session_type": session_type, "external_id": external_id, "metadata": metadata}
+        if started_at:
+            payload["started_at"] = started_at
+        r = self._post("/api/ingest/session/open", payload)
         if r is None or r.status_code >= 400:
             raise RuntimeError(
                 "provy: could not open session after retries. "
@@ -395,6 +405,7 @@ class ProvyClient:
         prompt_version: str | None = None,
         cache_read_tokens:  int | None = None,
         cache_write_tokens: int | None = None,
+        occurred_at:    str | None = None,
     ) -> str:
         """Log a trace step. Returns the span_id for this step (use as parent_trace_id for children).
 
@@ -525,6 +536,15 @@ class ProvyClient:
                        ("cache_write_tokens", cache_write_tokens)):
             if _v is not None:
                 body[_k] = _v
+        # ⛔ WHEN THE STEP RAN, NOT WHEN PROVY HEARD ABOUT IT (argus#1072). Without this the server
+        # stamps arrival, so a collector catching up after an outage records hours of work as a burst
+        # at the moment it drained, and every recency and drift reading describes our ingestion
+        # instead of the caller's agents. The OTel door has always carried the span's own clock; this
+        # one could not, which meant the door we recommend was the one that lost the time.
+        #
+        # ISO 8601. A time in the future is refused server-side and falls back to arrival.
+        if occurred_at:
+            body["occurred_at"] = occurred_at
         # ⛔ EVERY SPAN CARRIES AN ID, EVEN WITHOUT OpenTelemetry INSTALLED. The server dedupes on
         # (tenant_id, session_id, span_id) and deliberately does NOT collapse spans that arrive
         # without an id, because a step that did not identify itself cannot be deduped. Since

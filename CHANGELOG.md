@@ -5,6 +5,19 @@ against the new surface will not run on the old package.
 
 ## 0.9.0
 
+### Added — telemetry that arrives late (argus#1072)
+
+- `trace(occurred_at=)` and `open_session(started_at=)`: when the work actually ran, ISO 8601.
+
+  Without them the server stamps arrival, so a collector catching up after an outage is recorded as a
+  burst of work at the moment it drained, and everything read from that clock describes Provy's
+  ingestion rather than your agents. It is most wrong right after an upstream incident.
+
+  ⛔ The OTel door has honoured a span's own `startTimeUnixNano` all along, so the door we recommend
+  was the door that lost the time. A time in the future is refused server-side, with five minutes of
+  clock skew allowed.
+
+
 Everything here was found by an outside integration that had never seen Provy, building against this
 README alone (argus#1057, #1071). None of it was caught by this package's own tests, because every
 one of them asserts what the code does and the defects were in what the code and the document
