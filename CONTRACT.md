@@ -78,7 +78,7 @@ does not state is a shape nobody can check.
 ```json
 {
   "entity_id":   "AAPL",           // REQUIRED. The work item.
-  "business_date": "2026-09-05",   // the day the WORK RAN. Absent lands on the server fallback.
+  "business_date": "2026-09-05",   // the day the WORK RAN. Absent: the server may settle only a prediction from the last day (argus#1439).
   "label":       "success",        // "success" | "fail", or omit and send `value`
   "value":       -29.05,           // numeric result, if the outcome carries one
   "signals":     { "win_rate": 0.4 },  // extra readings, optional
@@ -124,6 +124,14 @@ unique. Tenant and workflow come from the ingest key, so **the caller supplies t
 send it at all, so every SDK caller landed on the server's fallback: the most recent open prediction
 for that entity wins, with a warning logged server-side and nothing visible to the caller. That
 reconciles against the wrong attempt whenever an entity is worked more than once.
+
+**The fallback is bounded (argus#1439, 30 Sep 2026).** An outcome that names neither `business_date` nor
+`session_id` may now settle only a prediction from the last 1 day (counted from `occurred_at`, or from
+arrival when that is absent). An older open prediction is no longer taken: the outcome is held, and the
+response says so (`status: held_awaiting_prediction`, with the sentence "It named no business_date and no
+session_id ... Send business_date"). Before this, the newest open prediction won however old, and on one
+production fleet 37 of 179 settled outcomes landed on a day the agent's own end-of-day totals contradict.
+Send `business_date` with every outcome and the limit never applies.
 
 ⛔ **Do not default it client-side.** A guessed date addresses a row that is wrong with confidence,
 which is worse than a missing one landing on a documented fallback. Absent means absent.

@@ -3,6 +3,14 @@
 Versions follow semver. A new argument on a public call is a MINOR bump, because a caller written
 against the new surface will not run on the old package.
 
+## Unreleased
+
+### Changed — contract, no API change (argus#1439)
+
+- The server's fallback for an outcome that sends no `business_date` and no `session_id` is now bounded to a
+  prediction from the last day. Older ones are held, not settled onto the wrong day. `report_outcome(business_date=)`
+  already existed; send it on every call. Documented in CONTRACT.md.
+
 ## 0.9.0
 
 ### Added — telemetry that arrives late (argus#1072)
