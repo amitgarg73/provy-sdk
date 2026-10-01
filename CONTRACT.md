@@ -115,6 +115,19 @@ coverage shows as unmeasured rather than as instant.
 `TraceLogger.time_step()` times a block and hands back the milliseconds. The auto-instrumented path in
 `client.py` always timed its calls and is unchanged.
 
+## A step whose own output reports a failure is a failed step (argus#1441)
+
+Provy reads the tool output you send. When a `tool_call` step has no `error` of its own and its output reports a failure, Provy
+records that message as the step's error (the label you sent is left as sent). Three generic shapes, none a domain word:
+
+1. an error-named key holding text: `error`, `error_message`, `errors`, or any key ending `_error` (`prev_day_error`), with a
+   non-empty string, an object with a `message`, or a non-empty list. `error_count: 0`, `has_error: false` and `errors: []` are not failures.
+2. a status-like field (`outcome`, `status`, `result`, `state`) whose value is one of your fleet's failure words: the built-in
+   `error`, `failed`, `timeout`, plus whatever you declare under Guardrails, Session outcomes. A word you never declared is not a failure.
+
+Send the failure as the step's `error` yourself when you can: it is exact, and nothing is inferred. This rule is the safety net for a
+tool that reports failure only inside its result. Spans written before argus#1441 are stamped by a one-off backfill.
+
 ## The work-item address (#733)
 
 A ledger row is keyed by `(tenant_id, workflow_id, entity_id, business_date)` and that tuple is

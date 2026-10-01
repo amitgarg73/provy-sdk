@@ -11,6 +11,9 @@ against the new surface will not run on the old package.
   prediction from the last day. Older ones are held, not settled onto the wrong day. `report_outcome(business_date=)`
   already existed; send it on every call. Documented in CONTRACT.md.
 
+- A `tool_call` whose own output reports a failure (an error-named key, or a status field holding one of the fleet's
+  declared failure words) is recorded as failed, with the output's message as its error (argus#1441). No API change.
+
 ## 0.9.0
 
 ### Added — telemetry that arrives late (argus#1072)
