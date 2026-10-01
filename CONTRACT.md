@@ -309,3 +309,10 @@ checks that total against `metadata.cost_breakdown` and against the steps.
   prints the difference rather than choosing silently.
 - Send the session total, or let Provy fall back to the breakdown and then the steps. It names which it used.
 - Do not send a round placeholder total. A total repeated identically on three or more sessions is shown as a probable estimate.
+
+### Data edges on the direct logger: `inputs=` (argus #1444)
+
+`TraceLogger.log_tool_call`, `log_agent_message` and `log_decision` accept `inputs=[span_id, ...]`: the spans whose OUTPUT this step consumed
+(the ids the `log_*` methods return). It is sent as `input_span_ids`, the same field the REST client's `trace(inputs=)` and OTLP span links
+carry. `inputs=None` means "not said" and sends nothing; `inputs=[]` means "consumed nothing". Without these edges Provy has only the order
+steps ran in, and "ran later" is not "was affected by", so a downstream step cannot be named as a victim of an upstream one.

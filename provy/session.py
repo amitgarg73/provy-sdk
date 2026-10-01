@@ -198,8 +198,11 @@ class TraceLogger:
         entity_id: Optional[str] = None,
         latency_ms: Optional[int] = None,
         model: Optional[str] = None,
+        inputs: Optional[list[str]] = None,
     ) -> str:
         """Write a tool_call row. Returns the new span_id.
+
+        `inputs` are the span ids whose OUTPUT this step consumed (the values these methods returned). See `_write` for why it is not a parent.
 
         `latency_ms` is how long the call took. Leave it out if you did not time it: an untimed call is
         sent as "not timed", never as 0 ms, which would read as timed and instant. `time_step()` times a
@@ -214,6 +217,7 @@ class TraceLogger:
             "entity_id":   entity_id,
             "latency_ms":  latency_ms,
             "model":       model,
+            "inputs":      inputs,
         })
 
     def log_agent_message(
@@ -228,8 +232,11 @@ class TraceLogger:
         latency_ms: Optional[int] = None,
         payload: Optional[dict] = None,
         claim: Optional[Any] = None,
+        inputs: Optional[list[str]] = None,
     ) -> str:
         """Write an agent_message row. Returns the new span_id.
+
+        `inputs` are the span ids whose OUTPUT this step consumed.
 
         `payload` carries structured scalars alongside the prose. A number stated only inside
         `reasoning` is one blob of text to Provy: it cannot be read as a signal, bound to a contract
@@ -250,6 +257,7 @@ class TraceLogger:
             "model":           model,
             "payload":         payload,
             "claim":           claim,
+            "inputs":          inputs,
         })
 
     def log_decision(
@@ -260,8 +268,11 @@ class TraceLogger:
         latency_ms: Optional[int] = None,
         model: Optional[str] = None,
         claim: Optional[Any] = None,
+        inputs: Optional[list[str]] = None,
     ) -> str:
         """Write a session-level decision row. Returns span_id.
+
+        `inputs` are the span ids whose OUTPUT this decision consumed.
 
         `claim` states what this decision EXPECTS to happen, before the answer exists:
         `{"signal", "value", "confidence"?, "entity_id"?}` or a list of those.
@@ -279,6 +290,7 @@ class TraceLogger:
             "latency_ms":  latency_ms,
             "model":       model,
             "claim":       claim,
+            "inputs":      inputs,
         })
 
     def log_skip(
@@ -505,6 +517,12 @@ class TraceLogger:
             "sequence":       self._sequence,
             "model":          model,
         }
+        # ⛔ `inputs` IS A DATA EDGE, NOT THE CALL TREE (argus#1009, #1444). `parent_span_id` above says this step ran inside that agent's
+        # span; `input_span_ids` says whose OUTPUT it read. Without them Provy has only position, and "ran later" is not "was affected by".
+        # None when the caller did not say: an unmigrated caller must not read as "consumed nothing".
+        inputs = fields.get("inputs")
+        input_span_ids = [i for i in inputs if isinstance(i, str) and i] if isinstance(inputs, (list, tuple)) else None
+        if input_span_ids is not None: payload["input_span_ids"] = input_span_ids
         if fields.get("tool_input")      is not None: payload["tool_input"]      = fields["tool_input"]
         if fields.get("tool_output")     is not None: payload["tool_output"]     = fields["tool_output"]
         if fields.get("agent_reasoning") is not None: payload["agent_reasoning"] = fields["agent_reasoning"]
@@ -533,5 +551,6 @@ class TraceLogger:
             "payload":       payload,
             "created_at":    datetime.utcnow().isoformat(),
         }
+        if input_span_ids is not None: row["input_span_ids"] = input_span_ids
         get_client().table("ag_traces").insert(row).execute()
         return span_id

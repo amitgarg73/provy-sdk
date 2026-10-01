@@ -103,3 +103,4 @@ See the git history; releases before 0.7.0 predate this file.
 
 ## Unreleased
 - Documentation only: per-step cost and tokens are for the whole step across model turns; Provy shows the source of each figure (argus #1446).
+- `TraceLogger.log_tool_call / log_agent_message / log_decision` take `inputs=` (span ids consumed), sent as `input_span_ids` (argus #1444).
