@@ -191,3 +191,32 @@ class TestUntimedSteps:
             assert t.ms is None
             _t.sleep(0.02)
         assert t.ms is not None and t.ms >= 15
+
+
+class TestInputsEdge:
+    """`inputs=` on the direct logger, as the REST client has had since argus#1009 (#1444)."""
+
+    def test_inputs_reach_the_row_and_the_payload(self):
+        tracer, captured = _make_tracer()
+        with patch("provy.db.get_client", return_value=tracer._db):
+            a = tracer.log_tool_call("research", "lookup", {"q": 1}, {"v": 2})
+            tracer.log_agent_message("risk", "ok", "approved", inputs=[a])
+            tracer.log_decision("orchestrator", "go", inputs=[a, "x"])
+        msg = captured[-2]
+        assert msg["input_span_ids"] == [a]
+        assert msg["payload"]["input_span_ids"] == [a]
+        assert captured[-1]["input_span_ids"] == [a, "x"]
+
+    def test_unsaid_is_not_empty(self):
+        tracer, captured = _make_tracer()
+        with patch("provy.db.get_client", return_value=tracer._db):
+            tracer.log_agent_message("risk", "ok", "approved")            # unmigrated caller
+            tracer.log_agent_message("risk", "ok", "approved", inputs=[])  # said: consumed nothing
+        assert "input_span_ids" not in captured[-2] and "input_span_ids" not in captured[-2]["payload"]
+        assert captured[-1]["input_span_ids"] == []
+
+    def test_junk_ids_are_dropped(self):
+        tracer, captured = _make_tracer()
+        with patch("provy.db.get_client", return_value=tracer._db):
+            tracer.log_agent_message("risk", "ok", "approved", inputs=["a", "", None, 3])  # type: ignore[list-item]
+        assert captured[-1]["input_span_ids"] == ["a"]

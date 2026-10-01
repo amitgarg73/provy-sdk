@@ -78,7 +78,7 @@ does not state is a shape nobody can check.
 ```json
 {
   "entity_id":   "AAPL",           // REQUIRED. The work item.
-  "business_date": "2026-09-05",   // the day the WORK RAN. Absent lands on the server fallback.
+  "business_date": "2026-09-05",   // the day the WORK RAN. Absent: the server may settle only a prediction from the last day (argus#1439).
   "label":       "success",        // "success" | "fail", or omit and send `value`
   "value":       -29.05,           // numeric result, if the outcome carries one
   "signals":     { "win_rate": 0.4 },  // extra readings, optional
@@ -115,6 +115,19 @@ coverage shows as unmeasured rather than as instant.
 `TraceLogger.time_step()` times a block and hands back the milliseconds. The auto-instrumented path in
 `client.py` always timed its calls and is unchanged.
 
+## A step whose own output reports a failure is a failed step (argus#1441)
+
+Provy reads the tool output you send. When a `tool_call` step has no `error` of its own and its output reports a failure, Provy
+records that message as the step's error (the label you sent is left as sent). Three generic shapes, none a domain word:
+
+1. an error-named key holding text: `error`, `error_message`, `errors`, or any key ending `_error` (`prev_day_error`), with a
+   non-empty string, an object with a `message`, or a non-empty list. `error_count: 0`, `has_error: false` and `errors: []` are not failures.
+2. a status-like field (`outcome`, `status`, `result`, `state`) whose value is one of your fleet's failure words: the built-in
+   `error`, `failed`, `timeout`, plus whatever you declare under Guardrails, Session outcomes. A word you never declared is not a failure.
+
+Send the failure as the step's `error` yourself when you can: it is exact, and nothing is inferred. This rule is the safety net for a
+tool that reports failure only inside its result. Spans written before argus#1441 are stamped by a one-off backfill.
+
 ## The work-item address (#733)
 
 A ledger row is keyed by `(tenant_id, workflow_id, entity_id, business_date)` and that tuple is
@@ -124,6 +137,14 @@ unique. Tenant and workflow come from the ingest key, so **the caller supplies t
 send it at all, so every SDK caller landed on the server's fallback: the most recent open prediction
 for that entity wins, with a warning logged server-side and nothing visible to the caller. That
 reconciles against the wrong attempt whenever an entity is worked more than once.
+
+**The fallback is bounded (argus#1439, 30 Sep 2026).** An outcome that names neither `business_date` nor
+`session_id` may now settle only a prediction from the last 1 day (counted from `occurred_at`, or from
+arrival when that is absent). An older open prediction is no longer taken: the outcome is held, and the
+response says so (`status: held_awaiting_prediction`, with the sentence "It named no business_date and no
+session_id ... Send business_date"). Before this, the newest open prediction won however old, and on one
+production fleet 37 of 179 settled outcomes landed on a day the agent's own end-of-day totals contradict.
+Send `business_date` with every outcome and the limit never applies.
 
 ⛔ **Do not default it client-side.** A guessed date addresses a row that is wrong with confidence,
 which is worse than a missing one landing on a documented fallback. Absent means absent.
@@ -277,3 +298,21 @@ payload that at-rest masking rewrites. That is the one that bit us.
 ⛔ **BEFORE ADDING A NAME TO EITHER LIST, CHECK WHICH SURFACE IT IS ON.** A name on the wrong list
 either does nothing or leaves content unmasked. Both lists are pinned by a test, so a change shows up
 in a diff on whichever side made it.
+
+### Cost and tokens must add up (argus #1446)
+
+Provy shows a session's own total (`total_cost_usd`, `total_tokens_in`, `total_tokens_out` on close) and says where each figure came from. It
+checks that total against `metadata.cost_breakdown` and against the steps.
+
+- **A step's `cost_usd` and tokens are for the whole step, summed over every model turn it made.** Not the last turn. A step that records only
+  its final turn makes the steps add to less than the session total (seen on one fleet: $18.43 of steps against a $42.36 total), and Provy then
+  prints the difference rather than choosing silently.
+- Send the session total, or let Provy fall back to the breakdown and then the steps. It names which it used.
+- Do not send a round placeholder total. A total repeated identically on three or more sessions is shown as a probable estimate.
+
+### Data edges on the direct logger: `inputs=` (argus #1444)
+
+`TraceLogger.log_tool_call`, `log_agent_message` and `log_decision` accept `inputs=[span_id, ...]`: the spans whose OUTPUT this step consumed
+(the ids the `log_*` methods return). It is sent as `input_span_ids`, the same field the REST client's `trace(inputs=)` and OTLP span links
+carry. `inputs=None` means "not said" and sends nothing; `inputs=[]` means "consumed nothing". Without these edges Provy has only the order
+steps ran in, and "ran later" is not "was affected by", so a downstream step cannot be named as a victim of an upstream one.

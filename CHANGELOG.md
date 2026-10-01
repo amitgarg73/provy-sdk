@@ -3,6 +3,17 @@
 Versions follow semver. A new argument on a public call is a MINOR bump, because a caller written
 against the new surface will not run on the old package.
 
+## Unreleased
+
+### Changed — contract, no API change (argus#1439)
+
+- The server's fallback for an outcome that sends no `business_date` and no `session_id` is now bounded to a
+  prediction from the last day. Older ones are held, not settled onto the wrong day. `report_outcome(business_date=)`
+  already existed; send it on every call. Documented in CONTRACT.md.
+
+- A `tool_call` whose own output reports a failure (an error-named key, or a status field holding one of the fleet's
+  declared failure words) is recorded as failed, with the output's message as its error (argus#1441). No API change.
+
 ## 0.9.0
 
 ### Added — telemetry that arrives late (argus#1072)
@@ -89,3 +100,7 @@ a patch number is not recoverable once it is on PyPI, so the version was raised 
 
 ## Earlier
 See the git history; releases before 0.7.0 predate this file.
+
+## Unreleased
+- Documentation only: per-step cost and tokens are for the whole step across model turns; Provy shows the source of each figure (argus #1446).
+- `TraceLogger.log_tool_call / log_agent_message / log_decision` take `inputs=` (span ids consumed), sent as `input_span_ids` (argus #1444).
