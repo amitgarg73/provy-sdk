@@ -100,3 +100,6 @@ a patch number is not recoverable once it is on PyPI, so the version was raised 
 
 ## Earlier
 See the git history; releases before 0.7.0 predate this file.
+
+## Unreleased
+- Documentation only: per-step cost and tokens are for the whole step across model turns; Provy shows the source of each figure (argus #1446).

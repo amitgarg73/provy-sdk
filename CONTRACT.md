@@ -298,3 +298,14 @@ payload that at-rest masking rewrites. That is the one that bit us.
 ⛔ **BEFORE ADDING A NAME TO EITHER LIST, CHECK WHICH SURFACE IT IS ON.** A name on the wrong list
 either does nothing or leaves content unmasked. Both lists are pinned by a test, so a change shows up
 in a diff on whichever side made it.
+
+### Cost and tokens must add up (argus #1446)
+
+Provy shows a session's own total (`total_cost_usd`, `total_tokens_in`, `total_tokens_out` on close) and says where each figure came from. It
+checks that total against `metadata.cost_breakdown` and against the steps.
+
+- **A step's `cost_usd` and tokens are for the whole step, summed over every model turn it made.** Not the last turn. A step that records only
+  its final turn makes the steps add to less than the session total (seen on one fleet: $18.43 of steps against a $42.36 total), and Provy then
+  prints the difference rather than choosing silently.
+- Send the session total, or let Provy fall back to the breakdown and then the steps. It names which it used.
+- Do not send a round placeholder total. A total repeated identically on three or more sessions is shown as a probable estimate.
