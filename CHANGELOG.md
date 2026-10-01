@@ -3,16 +3,26 @@
 Versions follow semver. A new argument on a public call is a MINOR bump, because a caller written
 against the new surface will not run on the old package.
 
-## Unreleased
+## 0.10.0
 
-### Changed — contract, no API change (argus#1439)
+### Added — span lineage on the direct logger (argus#1444)
+
+- `TraceLogger.log_tool_call`, `log_agent_message` and `log_decision` take `inputs=[span_id, ...]`: the spans whose OUTPUT the
+  step consumed (the ids those methods return). Sent as `input_span_ids`, the same field `ProvyClient.trace(inputs=)` and OTLP
+  span links carry. `inputs=None` sends nothing ("not said"); `inputs=[]` means "consumed nothing". Without these edges Provy has
+  only the order steps ran in, and "ran later" is not "was affected by".
+
+### Changed — contract, no API change
 
 - The server's fallback for an outcome that sends no `business_date` and no `session_id` is now bounded to a
   prediction from the last day. Older ones are held, not settled onto the wrong day. `report_outcome(business_date=)`
-  already existed; send it on every call. Documented in CONTRACT.md.
+  already existed; send it on every call. Documented in CONTRACT.md. (argus#1439)
 
 - A `tool_call` whose own output reports a failure (an error-named key, or a status field holding one of the fleet's
-  declared failure words) is recorded as failed, with the output's message as its error (argus#1441). No API change.
+  declared failure words) is recorded as failed, with the output's message as its error. No API change. (argus#1441)
+
+- A step's `cost_usd` and tokens are for the whole step, summed over every model turn, not the last turn. Provy now names the
+  source of each cost figure and says when the steps add to something else than the session total. Documented in CONTRACT.md. (argus#1446)
 
 ## 0.9.0
 
@@ -100,7 +110,3 @@ a patch number is not recoverable once it is on PyPI, so the version was raised 
 
 ## Earlier
 See the git history; releases before 0.7.0 predate this file.
-
-## Unreleased
-- Documentation only: per-step cost and tokens are for the whole step across model turns; Provy shows the source of each figure (argus #1446).
-- `TraceLogger.log_tool_call / log_agent_message / log_decision` take `inputs=` (span ids consumed), sent as `input_span_ids` (argus #1444).
