@@ -3,6 +3,16 @@
 Versions follow semver. A new argument on a public call is a MINOR bump, because a caller written
 against the new surface will not run on the old package.
 
+## Unreleased
+
+### Fixed — OTLP exporter loses a full batch silently (argus#1683)
+
+- `ProvyExporter` sent every batch the OpenTelemetry `BatchSpanProcessor` gave it as one request. The default batch is 512
+  spans and the gateway refuses more than 500, so every full batch was refused, the exporter returned `FAILURE` with no
+  message, and the run exited 0 with most of its spans missing. It now sends at most 500 spans per request.
+- A refused or failed export now logs one warning (`provy.sdk`) with the HTTP status and the server's message. Once per
+  process, because a refused batch repeats for every batch. Nothing else about the exporter changes.
+
 ## 0.10.0
 
 ### Added — span lineage on the direct logger (argus#1444)

@@ -215,6 +215,38 @@ class _MaskGate:
             return None
 
 
+#: The gateway's per-request ceiling on spans (`MAX_BATCH` in web/lib/ingest-core.ts). The exporter sends
+#: in chunks of this size so a default BatchSpanProcessor (512 per batch) is never refused whole.
+OTLP_MAX_SPANS_PER_REQUEST = 500
+
+_EXPORT_WARNED = False
+_EXPORT_WARN_LOCK = threading.Lock()
+
+
+def _reset_export_warning() -> None:
+    global _EXPORT_WARNED
+    with _EXPORT_WARN_LOCK:
+        _EXPORT_WARNED = False
+
+
+def _warn_export_failed(endpoint: str, status: "int | None", body: str, spans: int) -> None:
+    """One audible line the first time an export is refused, so a run that loses spans says so.
+
+    Once per process: a refused batch repeats for every batch and the log would be the problem.
+    """
+    global _EXPORT_WARNED
+    with _EXPORT_WARN_LOCK:
+        if _EXPORT_WARNED:
+            return
+        _EXPORT_WARNED = True
+    what = f"HTTP {status}" if status is not None else "no response"
+    log.warning(
+        "provy: span export to %s failed (%s: %s). %d spans in this request were not delivered, and "
+        "later failures will not be logged again. Check the endpoint is your Provy base URL and the "
+        "ingest key is for that environment.", endpoint, what, (body or "")[:200].replace("\n", " "), spans,
+    )
+
+
 class ProvyExporter(SpanExporter):  # type: ignore[misc]
     """
     OTel SpanExporter. Attach to any TracerProvider; spans stream to Provy.
@@ -280,16 +312,29 @@ class ProvyExporter(SpanExporter):  # type: ignore[misc]
                 "events":              events,
             })
 
-        payload = {"resourceSpans": [{"scopeSpans": [{"spans": otlp_spans}]}]}
-        try:
-            masked = self._gate.apply(payload)
-            if masked is None:
-                return SpanExportResult.FAILURE
-            r = requests.post(self.endpoint, json=masked, headers=self._headers, timeout=10)
-            r.raise_for_status()
+        # ⛔ NEVER ONE REQUEST FOR A WHOLE BATCH (argus#1683). OpenTelemetry's BatchSpanProcessor hands
+        # an exporter up to 512 spans by default; the gateway refuses more than 500 in one request with
+        # a 413. Sent whole, every full batch failed, the exporter returned FAILURE with no message,
+        # and a customer saw 8 of 330 sessions arrive from a run that exited 0.
+        ok = True
+        for start in range(0, len(otlp_spans), OTLP_MAX_SPANS_PER_REQUEST):
+            chunk = otlp_spans[start:start + OTLP_MAX_SPANS_PER_REQUEST]
+            payload = {"resourceSpans": [{"scopeSpans": [{"spans": chunk}]}]}
+            try:
+                masked = self._gate.apply(payload)
+                if masked is None:
+                    ok = False
+                    continue
+                r = requests.post(self.endpoint, json=masked, headers=self._headers, timeout=10)
+                if r.status_code >= 300:
+                    _warn_export_failed(self.endpoint, r.status_code, r.text, len(chunk))
+                    ok = False
+            except Exception as exc:
+                _warn_export_failed(self.endpoint, None, str(exc), len(chunk))
+                ok = False
+        if ok:
             return SpanExportResult.SUCCESS  # type: ignore[attr-defined]
-        except Exception:
-            return SpanExportResult.FAILURE  # type: ignore[attr-defined]
+        return SpanExportResult.FAILURE  # type: ignore[attr-defined]
 
     def shutdown(self) -> None:
         pass
