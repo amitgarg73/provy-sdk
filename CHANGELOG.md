@@ -3,7 +3,9 @@
 Versions follow semver. A new argument on a public call is a MINOR bump, because a caller written
 against the new surface will not run on the old package.
 
-## Unreleased
+## 0.10.1
+
+A patch release. The OTLP exporter no longer loses spans silently. No new required argument anywhere, so a patch bump.
 
 ### Added — a run says how it went (argus#1686)
 
