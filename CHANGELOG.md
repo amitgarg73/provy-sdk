@@ -5,6 +5,12 @@ against the new surface will not run on the old package.
 
 ## Unreleased
 
+### Added — a run says how it went (argus#1686)
+
+- The OTel exporter and the direct client print one line to stderr when the process ends: spans sent and accepted, and how many
+  were refused or lost. `ProvyExporter.delivery_report()` returns the counts; `buffer_stats` gains `sent`. `PROVY_QUIET=1` silences
+  the line. Nothing is sent that was not sent before; this only reports.
+
 ### Fixed — OTLP exporter loses a full batch silently (argus#1683)
 
 - `ProvyExporter` sent every batch the OpenTelemetry `BatchSpanProcessor` gave it as one request. The default batch is 512

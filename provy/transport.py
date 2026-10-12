@@ -20,6 +20,8 @@ The rules this module follows:
 from __future__ import annotations
 
 import atexit
+import os
+import sys
 import logging
 import random
 import threading
@@ -128,6 +130,8 @@ class SpanBuffer:
         self._stop = threading.Event()
         self._dropped = 0
         self._failed = 0
+        self._sent = 0
+        self._summarised = False
         self._thread: threading.Thread | None = None
         atexit.register(self.shutdown)
 
@@ -175,6 +179,8 @@ class SpanBuffer:
                 "provy: %d span(s) could not be delivered and are lost. %d lost in total.",
                 len(batch), self._failed,
             )
+        else:
+            self._sent += len(batch)
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -200,13 +206,30 @@ class SpanBuffer:
         self._stop.set()
         self._wake.set()
         self.flush()
+        self._summarise()
+
+    def _summarise(self) -> None:
+        """Say, once, how the run went (argus#1686). Silence is never the answer: a run that lost data used to look exactly like one that did not.
+
+        Written to stderr so it reaches a person who has configured no logging at all. `PROVY_QUIET=1` turns it off.
+        """
+        if self._summarised:
+            return
+        self._summarised = True
+        if os.environ.get("PROVY_QUIET", "").strip().lower() in ("1", "true", "yes", "on"):
+            return
+        if not (self._sent or self._failed or self._dropped):
+            return
+        lost = self._failed + self._dropped
+        line = f"provy: {self._sent} span(s) sent and accepted" + (f", {lost} lost" if lost else "") + "."
+        print(line, file=sys.stderr)
 
     @property
     def stats(self) -> dict:
         """Visible counts, so loss can be asserted on rather than guessed at."""
         with self._lock:
             pending = len(self._q)
-        return {"pending": pending, "dropped": self._dropped, "failed": self._failed}
+        return {"pending": pending, "dropped": self._dropped, "failed": self._failed, "sent": self._sent}
 
 
 def batched(items: Iterable[dict], size: int) -> Iterable[list[dict]]:
