@@ -13,6 +13,12 @@ against the new surface will not run on the old package.
 - A refused or failed export now logs one warning (`provy.sdk`) with the HTTP status and the server's message. Once per
   process, because a refused batch repeats for every batch. Nothing else about the exporter changes.
 
+### Fixed — `ProvyExporter(endpoint=...)` doubled the OTLP path (argus#1684)
+
+- `endpoint` was documented without saying whether it is a base URL or the full URL, and the exporter always appended
+  `/api/otlp/v1/traces`. A caller who passed the path the help page names sent every span to a 404 and nothing was logged.
+  A value that already ends in the path is now used as given, and the README says what `endpoint` is.
+
 ## 0.10.0
 
 ### Added — span lineage on the direct logger (argus#1444)
