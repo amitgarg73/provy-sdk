@@ -36,6 +36,7 @@ shapes, same key:
 from __future__ import annotations
 
 import os
+import sys
 import time
 import uuid
 import functools
@@ -285,6 +286,9 @@ class ProvyExporter(SpanExporter):  # type: ignore[misc]
         self.endpoint = _otlp_endpoint(endpoint)
         self._headers = {"x-provy-key": api_key, "Content-Type": "application/json"}
         self._enabled = enabled
+        self._count_lock = threading.Lock()
+        self._counts = {"sent": 0, "accepted": 0, "refused": 0}
+        self._summarised = False
         # Check the gate now rather than waiting for the first call. A client is often built at
         # import time and used much later; warning here puts the message next to the construction
         # that caused it instead of somewhere deep in a run.
@@ -335,24 +339,50 @@ class ProvyExporter(SpanExporter):  # type: ignore[misc]
         for start in range(0, len(otlp_spans), OTLP_MAX_SPANS_PER_REQUEST):
             chunk = otlp_spans[start:start + OTLP_MAX_SPANS_PER_REQUEST]
             payload = {"resourceSpans": [{"scopeSpans": [{"spans": chunk}]}]}
+            with self._count_lock:
+                self._counts["sent"] += len(chunk)
             try:
                 masked = self._gate.apply(payload)
                 if masked is None:
                     ok = False
+                    with self._count_lock:
+                        self._counts["refused"] += len(chunk)
                     continue
                 r = requests.post(self.endpoint, json=masked, headers=self._headers, timeout=10)
                 if r.status_code >= 300:
                     _warn_export_failed(self.endpoint, r.status_code, r.text, len(chunk))
                     ok = False
+                    with self._count_lock:
+                        self._counts["refused"] += len(chunk)
+                else:
+                    with self._count_lock:
+                        self._counts["accepted"] += len(chunk)
             except Exception as exc:
                 _warn_export_failed(self.endpoint, None, str(exc), len(chunk))
                 ok = False
+                with self._count_lock:
+                    self._counts["refused"] += len(chunk)
         if ok:
             return SpanExportResult.SUCCESS  # type: ignore[attr-defined]
         return SpanExportResult.FAILURE  # type: ignore[attr-defined]
 
+    def delivery_report(self) -> dict:
+        """How many spans this exporter handed to Provy, how many Provy accepted, and how many it did not (argus#1686)."""
+        with self._count_lock:
+            return dict(self._counts)
+
     def shutdown(self) -> None:
-        pass
+        # One line, once, so a run that lost spans no longer looks like one that did not. PROVY_QUIET=1 turns it off.
+        if self._summarised:
+            return
+        self._summarised = True
+        if os.environ.get("PROVY_QUIET", "").strip().lower() in ("1", "true", "yes", "on"):
+            return
+        c = self.delivery_report()
+        if not c["sent"]:
+            return
+        refused = c["refused"]
+        print(f"provy: {c['accepted']} of {c['sent']} span(s) accepted" + (f", {refused} refused" if refused else "") + ".", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------

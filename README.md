@@ -328,6 +328,8 @@ recording it twice. You do not pass one and do not need to.
 ### `ProvyExporter(api_key, endpoint=None, enabled=None, mask=None)`
 OTel `SpanExporter`. Attach to any `TracerProvider`. Needs the `otel` extra. `endpoint` is your Provy base URL, for example `https://provy.ai`; the `/api/otlp/v1/traces` path is added for you. Passing the full path also works. Left out, it follows `PROVY_URL`. Takes the same `mask` as the client, because span attributes carry your content too.
 
+At the end of a run it prints one line to stderr, for example `provy: 2040 of 2040 span(s) accepted.` or `provy: 0 of 4 span(s) accepted, 4 refused.`, so a run that lost spans no longer looks like one that did not. `delivery_report()` returns the same numbers as a dict. The direct client does the same for its buffer (`provy: 5 span(s) sent and accepted.`), and `buffer_stats` gains a `sent` count. `PROVY_QUIET=1` turns the line off.
+
 ### `tokenizing_masker(secret, rules=None)` / `redacting_masker(rules=None)`
 Maskers for the `mask` argument. Prefer the tokenizing one; see the section above for why.
 
