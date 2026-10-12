@@ -326,7 +326,7 @@ on `(tenant, session, span_id)`, so a retry after a lost response replaces the s
 recording it twice. You do not pass one and do not need to.
 
 ### `ProvyExporter(api_key, endpoint=None, enabled=None, mask=None)`
-OTel `SpanExporter`. Attach to any `TracerProvider`. Needs the `otel` extra. Takes the same `mask` as the client, because span attributes carry your content too.
+OTel `SpanExporter`. Attach to any `TracerProvider`. Needs the `otel` extra. `endpoint` is your Provy base URL, for example `https://provy.ai`; the `/api/otlp/v1/traces` path is added for you. Passing the full path also works. Left out, it follows `PROVY_URL`. Takes the same `mask` as the client, because span attributes carry your content too.
 
 ### `tokenizing_masker(secret, rules=None)` / `redacting_masker(rules=None)`
 Maskers for the `mask` argument. Prefer the tokenizing one; see the section above for why.

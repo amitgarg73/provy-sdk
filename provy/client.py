@@ -245,6 +245,21 @@ def _warn_export_failed(endpoint: str, status: "int | None", body: str, spans: i
         "later failures will not be logged again. Check the endpoint is your Provy base URL and the "
         "ingest key is for that environment.", endpoint, what, (body or "")[:200].replace("\n", " "), spans,
     )
+_OTLP_PATH = "/api/otlp/v1/traces"
+
+
+def _otlp_endpoint(endpoint: "str | None") -> str:
+    """The full OTLP URL for whatever the caller passed as `endpoint`.
+
+    ⛔ BOTH SPELLINGS ARE SENSIBLE AND ONLY ONE USED TO WORK (argus#1684). The README documents the
+    parameter as `endpoint=None` with no statement of what it is. The OTLP section of the help page
+    names the path `/api/otlp/v1/traces`, so a customer passed exactly that. The exporter appended the
+    path again, the request went to `.../api/otlp/v1/traces/api/otlp/v1/traces`, the 404 was swallowed,
+    and 2,040 spans from a run that exited 0 never arrived. A value that already ends in the path is
+    used as it is; anything else is a base URL and gets the path added.
+    """
+    base = (endpoint or PROVY_BASE_URL).rstrip("/")
+    return base if base.endswith(_OTLP_PATH) else base + _OTLP_PATH
 
 
 class ProvyExporter(SpanExporter):  # type: ignore[misc]
@@ -267,7 +282,7 @@ class ProvyExporter(SpanExporter):  # type: ignore[misc]
         # the direct client does. See provy.redact.
         self._gate = _MaskGate(mask)
         self.api_key  = api_key
-        self.endpoint = (endpoint or PROVY_BASE_URL).rstrip("/") + "/api/otlp/v1/traces"
+        self.endpoint = _otlp_endpoint(endpoint)
         self._headers = {"x-provy-key": api_key, "Content-Type": "application/json"}
         self._enabled = enabled
         # Check the gate now rather than waiting for the first call. A client is often built at
