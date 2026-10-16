@@ -20,6 +20,7 @@ from typing import Any
 from provy.client import ProvyClient, ProvyExporter
 from provy.session import TraceLogger
 from provy.evals import write_eval
+from provy.versioning import prompt_hash
 from provy.redact import (
     tokenizing_masker,
     redacting_masker,
@@ -92,6 +93,8 @@ __all__ = [
     "ProvyExporter",
     "TraceLogger",
     "write_eval",
+    # a stable version label from a system prompt, so nobody invents one (argus#1735)
+    "prompt_hash",
     # tenant-side masking. tokenizing_masker is the one to reach for: a stable pseudonym keeps
     # "is this the same person" answerable, which a flat label destroys. See provy/redact.py.
     "tokenizing_masker",

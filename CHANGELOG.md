@@ -3,6 +3,19 @@
 Versions follow semver. A new argument on a public call is a MINOR bump, because a caller written
 against the new surface will not run on the old package.
 
+## 0.11.0
+
+A new public call, `set_prompt`, so a minor bump. Nothing is refused and no span changes shape.
+
+### Added: say what the instructions are once, and say so when a version is missing (argus#1735)
+
+- `client.set_prompt(agent, system_prompt)` registers which instructions an agent runs with. Every agent step it sends then carries `prompt_version`,
+  a short stable hash of the prompt (`provy.prompt_hash`, whitespace ignored), so nobody has to invent a label. `version="..."` uses your own, an explicit
+  `prompt_version=` on one `trace()` call wins, and `PROVY_PROMPT_VERSION` is a fleet-wide default. A tool call is never given a prompt version.
+- At the end of a run the client and `ProvyExporter` say, once, on stderr, how many agent steps carried no `prompt_version` and how many model steps carried no
+  `model`. `coverage_report()` returns the same numbers. A step that runs no model is not counted as missing one. `PROVY_QUIET=1` silences it.
+- Why: on production 0 of 10,614 spans carried a prompt version and 4% a model, so "what changed before it broke" could not be answered, and that history cannot be backfilled.
+
 ## 0.10.1
 
 A patch release. The OTLP exporter no longer loses spans silently. No new required argument anywhere, so a patch bump.
