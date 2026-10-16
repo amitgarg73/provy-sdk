@@ -35,6 +35,7 @@ shapes, same key:
 
 from __future__ import annotations
 
+import atexit
 import os
 import sys
 import time
@@ -43,6 +44,7 @@ import functools
 import threading
 import logging
 import requests
+from .versioning import VersionCoverage, VERSIONED_STEPS, prompt_hash, default_prompt_version
 from typing import Callable
 from .identity import agent_base
 
@@ -288,6 +290,7 @@ class ProvyExporter(SpanExporter):  # type: ignore[misc]
         self._enabled = enabled
         self._count_lock = threading.Lock()
         self._counts = {"sent": 0, "accepted": 0, "refused": 0}
+        self._coverage = VersionCoverage()
         self._summarised = False
         # Check the gate now rather than waiting for the first call. A client is often built at
         # import time and used much later; warning here puts the message next to the construction
@@ -304,6 +307,7 @@ class ProvyExporter(SpanExporter):  # type: ignore[misc]
         for span in spans:
             ctx = span.get_span_context()
             parent_ctx = span.parent
+            self._note_versions(span.attributes or {})
 
             attrs = []
             for k, v in (span.attributes or {}).items():
@@ -366,6 +370,26 @@ class ProvyExporter(SpanExporter):  # type: ignore[misc]
             return SpanExportResult.SUCCESS  # type: ignore[attr-defined]
         return SpanExportResult.FAILURE  # type: ignore[attr-defined]
 
+    @staticmethod
+    def _first(attrs, keys):
+        for k in keys:
+            v = attrs.get(k)
+            if v not in (None, ""):
+                return v
+        return None
+
+    def _note_versions(self, attrs) -> None:
+        # Counted from the span's own attributes, under the names the server reads (lib/otel-normalize.ts): provy.* or argus.*.
+        step = self._first(attrs, ("provy.step_type", "argus.step_type"))
+        pv = self._first(attrs, ("provy.prompt_version", "argus.prompt_version", "gen_ai.request.prompt_version"))
+        model = self._first(attrs, ("provy.model", "argus.model", "gen_ai.request.model", "gen_ai.response.model"))
+        tokens = self._first(attrs, ("provy.tokens_input", "argus.tokens_input", "gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens"))
+        self._coverage.note(step, pv is not None, model is not None, tokens is not None)
+
+    def coverage_report(self) -> dict:
+        """Agent steps and model steps this exporter saw, and how many went without a prompt_version or a model name (argus#1735)."""
+        return self._coverage.report()
+
     def delivery_report(self) -> dict:
         """How many spans this exporter handed to Provy, how many Provy accepted, and how many it did not (argus#1686)."""
         with self._count_lock:
@@ -376,6 +400,7 @@ class ProvyExporter(SpanExporter):  # type: ignore[misc]
         if self._summarised:
             return
         self._summarised = True
+        self._coverage.say()
         if os.environ.get("PROVY_QUIET", "").strip().lower() in ("1", "true", "yes", "on"):
             return
         c = self.delivery_report()
@@ -406,6 +431,10 @@ class ProvyClient:
         # tokenizing masker and why a stable pseudonym beats a flat label. Provy masks again on the
         # way out to a model provider regardless, so this is defence in depth, not the only layer.
         self._gate = _MaskGate(mask)
+        # What each agent ran with, and what the run sent (argus#1735). Reported at exit; never changes or refuses a span.
+        self._prompts: dict[str, str] = {}
+        self._coverage = VersionCoverage()
+        atexit.register(self._coverage.say)
         self._headers = {
             "x-provy-key":  self.key,
             "Content-Type": "application/json",
@@ -474,6 +503,23 @@ class ProvyClient:
 
         return session_id
 
+    def set_prompt(self, agent: str, system_prompt: str | None = None, *, version: str | None = None) -> str:
+        """Say once which instructions an agent runs with, and every step it sends carries that version (argus#1735).
+
+        Pass the system prompt and the version is a short hash of it (`prompt_hash`), so it changes exactly when the prompt does and you invent no label.
+        Or pass `version=` to use your own (a git hash, `assistant-v12`). An explicit `prompt_version=` on a single `trace()` call still wins.
+        Returns the version in use.
+        """
+        if version is None and system_prompt is None:
+            raise ValueError("set_prompt needs the system prompt text or an explicit version=")
+        v = version if version is not None else prompt_hash(system_prompt or "")
+        self._prompts[agent] = v
+        return v
+
+    def coverage_report(self) -> dict:
+        """Agent steps and model steps sent so far, and how many went without a prompt_version or a model name."""
+        return self._coverage.report()
+
     def trace(
         self,
         session_id:     str,
@@ -525,6 +571,12 @@ class ProvyClient:
             # Still hand back a real id. Its documented job is to be passed as parent_trace_id, and
             # the caller's call graph must not change shape depending on whether telemetry is on.
             return uuid.uuid4().hex[:16]
+
+        # The version this agent's instructions are on (argus#1735): an explicit argument wins, then what `set_prompt` registered for the agent (by exact name,
+        # then base name, so `research_GILD` finds `research`), then PROVY_PROMPT_VERSION. Only an agent step has instructions; a tool call is left alone.
+        if prompt_version is None and step_type in VERSIONED_STEPS:
+            prompt_version = self._prompts.get(agent) or self._prompts.get(agent_base(agent) or agent) or default_prompt_version()
+        self._coverage.note(step_type, prompt_version is not None, model is not None, tokens_in is not None or tokens_out is not None)
 
         span_id        = None
         parent_span_id = parent_trace_id  # caller override
